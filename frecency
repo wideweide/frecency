@@ -1,0 +1,1029 @@
+#!/bin/bash
+# ============================================================================
+# frecency - 带时间衰减的导航/历史条目管理器（SQLite + fzf）
+# ============================================================================
+# 特点：
+#   - 多 topic：dir / file / cmd / 任意自定义，各自独立数据库
+#   - 真正的 frecency：事件时钟 + 指数移动和（EMS）；写入时衰减、读取时对齐
+#   - 关键词（书签）：提供快捷检索/高亮；可单独取消书签而保留 EMS 历史
+#   - fzf 模态界面（NORMAL / SEARCH）+ 智能预览 + 手工策展（删/撤销）
+#   - 两种检索模式（SEARCH_MODE），见文件内「默认配置」处的说明：
+#       sqlite（默认）按键回查  ->  支持有序/任意顺序多词匹配 + 匹配质量分级
+#       fzf               全量载入  ->  零按键延迟，按缩写后的展示列本地过滤
+#   - 匹配质量分级可经 GRADE_MODE=off 关闭（统一按 EMS 排序）
+#
+# 排序模型（v3）：写入时衰减，读取时对齐
+#   写入：score = score * exp(-LAMBDA * Δticks) + 1
+#   读取：current = score * exp(-LAMBDA * (T_now - tick))
+#   其中 Δticks = 全局事件时钟增量（每次 add 走一格，空闲不走）。
+#   score 只在「该条目自己被访问」时变化，所以它只对那一刻的 tick 有效；
+#   不同条目的 score 处在不同 tick 上，彼此不可直接比较 —— 排序 / 清理 /
+#   展示一律改用 current，把所有人对齐到同一时刻。
+#   半衰期 = ln(2)/LAMBDA 次访问。LAMBDA=0.01 -> 约 69 次。
+#   这样避免了「老条目永久霸榜」，也避免了「放个假回来全部归零」。
+#
+# Usage:
+#    frecency <topic> init                     : 初始化/迁移数据库
+#    frecency <topic> add <content> [keyword]  : 记录一条（topic 可用逗号分隔写多库）
+#    frecency <topic> unbook <content>        : 取消书签，保留 EMS 历史
+#    frecency <topic> query [search_term]      : 打开 fzf 界面
+#    frecency <topic> jump-handler [term]      : 供 shell / vifm 集成
+#    frecency <topic> remove <content>         : 删除一条（可撤销）
+#    frecency <topic> cleanup                  : 手动维护
+#
+# 通用接口允许逗号分隔 topic 一次写入多个库；Vifm/Fish 集成统一使用 file：
+#    frecency topic-a,topic-b add /path/to/x
+#
+# Dependencies:
+#    - Core: bash (4.4+), sqlite3 (>=3.35.0, 需含 exp() 数学函数), fzf (>=0.35.0), file, coreutils, flock
+#    - Optional: eza (目录预览), bat / highlight (语法高亮)
+#    - 部署自检: frecency-test （会写入 sqlite3 选择缓存）
+# ============================================================================
+
+export LANG="en_US.UTF-8"
+export LC_ALL="en_US.UTF-8"
+
+# 字段分隔符：ASCII UNIT SEPARATOR。路径中几乎不可能出现，
+# 避免旧版用 \t 时「路径含 TAB 被截断」的问题。
+SEP=$'\x1f'
+
+SCHEMA_VERSION=3
+
+# --- Paths and Identity ---
+DATA_DIR="$HOME/.local/share/frecency"
+mkdir -p "$DATA_DIR"
+SELF=$(readlink -f "$0")
+SCRIPT_DIR=$(dirname "$SELF")
+TOPIC="${1:-default}"
+ACTION="$2"
+[ -n "$ACTION" ] && shift 2
+
+# --- 架构探测（与 frecency-test 保持一致）---
+_sqlite_arch=""
+case "$(uname -m)" in
+    x86_64|amd64)  _sqlite_arch="x86_64" ;;
+    aarch64|arm64) _sqlite_arch="arm64" ;;
+esac
+
+# --- 默认配置（可被 <topic>.config 覆盖）---
+MAX_ENTRIES=10000
+MAX_DAYS=300
+SLEEP_DELAY=0.06    # sqlite 模式的 reload 去抖。实测查询本身只要 ~25ms，设 0.2 全是白等的迟滞
+START_DATA=all      # 'last' 最近条目 / 'all' 全量
+START_MODE=search   # 'normal' (Vim 键) / 'search' (直接输入)
+LAST_LIMIT=15
+MAX_PATH_CHARS=60  # 以显示宽度计（ASCII 1，非 ASCII 2）；仅超过该值才缩写列表路径
+# 检索模式（两者都保留，按需在 <topic>.config 里切换）：
+#   sqlite  每次按键回数据库一次。作为交换，它知道查询词，因此能做：
+#             · 有序多词（默认）或任意顺序多词（按 s 切换）
+#             · 匹配质量分级 —— 仅查询命中关键词时使用关键词命中档；路径匹配按路径档
+#   fzf     启动时一次性全量载入内存，按键零延迟、不需要 reload 去抖。
+#            代价是不能按完整隐藏路径匹配，也不做 query-aware 质量分级。
+SEARCH_MODE=sqlite
+# 匹配质量分级开关（仅 SEARCH_MODE=sqlite 且有搜索词时生效）：
+#   on   (默认) 按关键词/路径命中质量硬分级，档内按 score_cur 排序
+#        提升 basename 精确命中在普通历史条目中的位置
+#   off  不计算匹配质量，所有匹配结果统一按 score_cur 排序（多词筛选照常生效）。
+#        jghub 的取向（fzf#4789）：分级是写死的偏好，会压过真实的使用历史
+GRADE_MODE=on
+MULTIWORD_MODE=ordered # ordered（默认）或 any-order；sqlite 模式的 fzf 界面可按 s 切换
+LAMBDA=0.01         # 衰减常数（单位：1/访问），半衰期 = ln2/LAMBDA
+UNDO_KEEP=200       # deleted_entries 保留条数
+IGNORE_PATTERNS=(
+    "*/fuse"        # FUSE 挂载点
+    "*/fuse/*"      # FUSE 挂载点内的文件
+    "*/.git"        # Git 元数据
+    "*/.git/*"
+    "*/tmp/*"       # 临时文件
+)
+
+# --- ANSI 颜色 ---
+C_NORMAL=$'\e[0m'
+C_BOLD=$'\e[1m'
+C_GREEN=$'\e[32m'
+C_CYAN=$'\e[36m'
+C_BLUE=$'\e[34m'
+C_YELLOW=$'\e[33m'
+
+# ============================================================================
+# sqlite3 选择：缓存 > 系统（版本达标） > bundled 静态二进制
+# ============================================================================
+# 说明：bundled 静态二进制是为了「服务器上没有 sqlite3」的兜底；
+#       但在有系统 sqlite3 的机器上它反而更慢（实测启动 40ms vs 3ms），
+#       所以默认优先系统版。选择结果缓存到 $DATA_DIR/.sqlite3.bin，
+#       只在缓存缺失时探测一次，之后零开销。frecency-test 会重写该缓存。
+_SQLITE_MIN=3035000   # 3.35.0（exp() 数学函数的最低版本；编译选项由运行时探测兜底）
+_FZF_MIN="0.48.0"     # --accept-nth / change-footer / rebind / --tmux 的最低版本
+SQLITE3=""
+
+_ver_num() { awk -F. '{printf "%d", ($1*1000000)+($2*1000)+$3}' <<< "$1"; }
+
+_sqlite_ok() {
+    local b="$1" v
+    v=$("$b" --version 2>/dev/null | awk '{print $1}') || return 1
+    [[ -n "$v" ]] || return 1
+    [[ $(_ver_num "$v") -ge $_SQLITE_MIN ]]
+}
+
+_resolve_sqlite3() {
+    local cache="$DATA_DIR/.sqlite3.bin" p
+    if [[ -s "$cache" ]]; then
+        p=$(<"$cache")
+        if [[ -n "$p" && ( -x "$p" || -n "$(command -v "$p" 2>/dev/null)" ) ]]; then
+            SQLITE3="$p"; return 0
+        fi
+    fi
+    local sys bundled
+    sys=$(command -v sqlite3 2>/dev/null)
+    bundled=""
+    if [[ -n "$_sqlite_arch" ]]; then
+        # 仓库布局为 bundled/sqlite3-<arch>；安装到 vifm scripts/ 时平铺为 sqlite3-<arch>
+        bundled="$SCRIPT_DIR/sqlite3-$_sqlite_arch"
+        [[ -x "$bundled" ]] || bundled="$SCRIPT_DIR/bundled/sqlite3-$_sqlite_arch"
+    fi
+    if [[ -n "$sys" ]] && _sqlite_ok "$sys"; then
+        SQLITE3="$sys"
+    elif [[ -n "$bundled" && -x "$bundled" ]] && _sqlite_ok "$bundled"; then
+        SQLITE3="$bundled"
+    else
+        SQLITE3="${sys:-${bundled:-sqlite3}}"
+    fi
+    printf '%s' "$SQLITE3" > "$cache" 2>/dev/null
+}
+_resolve_sqlite3
+
+# ============================================================================
+# SQL 工具
+# ============================================================================
+# 把任意值转成安全的 SQL 字符串字面量（' -> ''）。
+# 这是唯一正确的转义方式；旧版用 .parameter + 双引号是文本插值，
+# 会导致「含反斜杠被吞字符 / 含双引号直接报错 / 含换行破坏结构」。
+sql_lit() { local s=${1//\'/\'\'}; printf "'%s'" "$s"; }
+
+# 生成 LIKE 模式时转义 ! / % / _，并配合 ESCAPE '!' 使用，
+# 否则用户输入的 % / _ 会被当成通配符。
+sql_like() {
+    local s=${1//!/!!}
+    s=${s//%/!%}
+    s=${s//_/!_}
+    sql_lit "%$s%"
+}
+
+sql_like_prefix() {
+    local s=${1//!/!!}
+    s=${s//%/!%}
+    s=${s//_/!_}
+    sql_lit "$s%"
+}
+
+sql_like_segment_prefix() {
+    local s=${1//!/!!}
+    s=${s//%/!%}
+    s=${s//_/!_}
+    sql_lit "%/$s%"
+}
+
+# 将多词查询合并成有序 LIKE 模式，例如 "foo bar" -> "%foo%bar%"。
+# 词本身的 LIKE 通配符仍按字面转义，词间 % 才是有序间隔。
+sql_like_ordered() {
+    local -a words=()
+    read -r -a words <<< "$1"
+    local pattern="" word escaped
+    for word in "${words[@]}"; do
+        escaped=${word//!/!!}
+        escaped=${escaped//%/!%}
+        escaped=${escaped//_/!_}
+        [[ -n "$pattern" ]] && pattern+="%"
+        pattern+="$escaped"
+    done
+    sql_lit "%$pattern%"
+}
+
+sql_like_ordered_prefix() {
+    local -a words=()
+    read -r -a words <<< "$1"
+    local pattern="" word escaped
+    for word in "${words[@]}"; do
+        escaped=${word//!/!!}
+        escaped=${escaped//%/!%}
+        escaped=${escaped//_/!_}
+        [[ -n "$pattern" ]] && pattern+="%"
+        pattern+="$escaped"
+    done
+    sql_lit "$pattern%"
+}
+
+_all_words_like_expr() {
+    local column="$1" expression="" word
+    shift
+    for word in "$@"; do
+        [[ -n "$expression" ]] && expression+=" AND "
+        expression+="$column LIKE $(sql_like "$word") ESCAPE '!'"
+    done
+    printf '(%s)' "$expression"
+}
+
+# 查询质量档位：与列表排序和 preview 共用，避免两处逻辑漂移。
+_query_grade_expr() {
+    local term="$1" last_word="$2" mode="${3:-ordered}"
+    local -a words=()
+    read -r -a words <<< "$term"
+    local full prefix contains lw lw_prefix lw_contains path_prefix hidden_prefix
+    full=$(sql_lit "$term")
+    if [[ "$mode" == "ordered" ]]; then
+        prefix=$(sql_like_ordered_prefix "$term")
+        contains=$(sql_like_ordered "$term")
+    else
+        local first_prefix rest_matches
+        first_prefix="keyword LIKE $(sql_like_prefix "${words[0]}") ESCAPE '!'"
+        rest_matches=$(_all_words_like_expr keyword "${words[@]:1}")
+        [[ -n "${words[*]:1}" ]] && prefix="($first_prefix AND $rest_matches)" \
+            || prefix="($first_prefix)"
+        contains=$(_all_words_like_expr keyword "${words[@]}")
+    fi
+    lw=$(sql_lit "$last_word")
+    lw_prefix=$(sql_like_prefix "$last_word")
+    lw_contains=$(sql_like "$last_word")
+    path_prefix=$(sql_like_segment_prefix "$last_word")
+    hidden_prefix=$(sql_like_segment_prefix ".$last_word")
+    if [[ "$mode" == "ordered" ]]; then
+        printf "(CASE
+        WHEN keyword = %s THEN 0
+        WHEN keyword LIKE %s ESCAPE '!' THEN 1
+        WHEN keyword LIKE %s ESCAPE '!' THEN 2
+        WHEN last_seg = %s THEN 3
+        WHEN last_seg LIKE %s ESCAPE '!' THEN 4
+        WHEN last_seg LIKE %s ESCAPE '!' THEN 5
+        WHEN content LIKE %s ESCAPE '!' OR content LIKE %s ESCAPE '!' THEN 6
+        ELSE 7 END)" \
+            "$full" "$prefix" "$contains" "$lw" "$lw_prefix" "$lw_contains" "$path_prefix" "$hidden_prefix"
+    else
+        printf "(CASE
+        WHEN keyword = %s THEN 0
+        WHEN %s THEN 1
+        WHEN %s THEN 2
+        WHEN last_seg = %s THEN 3
+        WHEN last_seg LIKE %s ESCAPE '!' THEN 4
+        WHEN last_seg LIKE %s ESCAPE '!' THEN 5
+        WHEN content LIKE %s ESCAPE '!' OR content LIKE %s ESCAPE '!' THEN 6
+        ELSE 7 END)" \
+            "$full" "$prefix" "$contains" "$lw" "$lw_prefix" "$lw_contains" "$path_prefix" "$hidden_prefix"
+    fi
+}
+
+_current_multiword_mode() {
+    local mode="${MULTIWORD_MODE:-ordered}"
+    if [[ -n "${FRECENCY_ORDER_FILE:-}" && -r "$FRECENCY_ORDER_FILE" ]]; then
+        IFS= read -r mode < "$FRECENCY_ORDER_FILE" || true
+    fi
+    [[ "$mode" == "any-order" ]] || mode="ordered"
+    printf '%s' "$mode"
+}
+
+# 通过 stdin 传 SQL，避免 heredoc 的 shell 展开介入
+run_sql() {
+    { printf '%s\n' ".timeout 5000"; printf '%s\n' "$1"; } \
+        | "$SQLITE3" -batch -bail -list -separator "$SEP" -init /dev/null "$DB_PATH"
+}
+
+# 把任意字符串安全地放进单引号里（供生成的 cd / goto 命令使用）
+shq() { local s=${1//\'/\'\\\'\'}; printf '%s' "$s"; }
+
+_require_sqlite3() {
+    if [[ ! -x "$SQLITE3" ]] && ! command -v "$SQLITE3" >/dev/null 2>&1; then
+        printf 'frecency: 找不到可用的 sqlite3 (%s)\n' "$SQLITE3" >&2
+        exit 127
+    fi
+}
+_require_fzf() {
+    if ! command -v fzf >/dev/null 2>&1; then
+        printf 'frecency: 未找到 fzf\n' >&2
+        exit 127
+    fi
+    # 版本门禁：实际依赖 0.48+ 特性（--accept-nth / change-footer / rebind / --tmux）。
+    local v; v=$(fzf --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+    if [[ -n "$v" ]] && (( $(_ver_num "$v") < $(_ver_num "$FZF_MIN_VER") )); then
+        printf 'frecency: fzf %s 过旧，需要 >= %s（--accept-nth / change-footer / rebind）\n' \
+            "$v" "$FZF_MIN_VER" >&2
+        exit 127
+    fi
+}
+
+# ============================================================================
+# 数据库
+# ============================================================================
+do_init() {
+    # 先记下迁移前的版本：v2 -> v3 需要重置被 PIN_BASE 污染的分数。
+    # 新库这里为空串（SELECT 会因为还没有 meta 表而失败）。
+    local prev=""
+    prev=$(run_sql "SELECT v FROM meta WHERE k = 'schema_version';" 2>/dev/null) || prev=""
+    # 注意顺序：必须先建表与迁移（ALTER ADD COLUMN），再建索引，
+    # --- 第 1 步：建表 / 建回收站 / 写 meta（不放索引）---
+    run_sql "
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA cache_size = -2000;
+
+CREATE TABLE IF NOT EXISTS entries (
+    content TEXT PRIMARY KEY,
+    keyword TEXT DEFAULT '',
+    score REAL DEFAULT 1.0,
+    visits INTEGER DEFAULT 1,
+    tick INTEGER DEFAULT 0,
+    last_access DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS deleted_entries (
+    content TEXT PRIMARY KEY,
+    keyword TEXT,
+    score REAL,
+    deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+
+INSERT OR IGNORE INTO meta VALUES ('schema_version','$SCHEMA_VERSION'), ('tick','0');
+" >/dev/null 2>&1 || {
+        printf 'frecency: 创建数据库基础结构失败：%s\n' "$DB_PATH" >&2
+        return 1
+    }
+
+    # --- 第 2 步：v1 -> v2 迁移，只给缺失的列发 ALTER ---
+    # 先检查列再 ALTER，避免重复加列；-bail 会让批处理在首个 SQL 错误处失败。
+    local have alters=""
+    have=$(run_sql "SELECT group_concat(name) FROM pragma_table_info('entries')
+                    WHERE name IN ('visits','tick');") || {
+        printf 'frecency: 无法读取数据库列信息：%s\n' "$DB_PATH" >&2
+        return 1
+    }
+    [[ "$have" != *visits* ]] && alters+="ALTER TABLE entries ADD COLUMN visits INTEGER DEFAULT 1;"$'\n'
+    [[ "$have" != *tick*   ]] && alters+="ALTER TABLE entries ADD COLUMN tick INTEGER DEFAULT 0;"$'\n'
+    if [[ -n "$alters" ]]; then
+        run_sql "$alters
+UPDATE entries SET visits = 1 WHERE visits IS NULL;
+UPDATE entries SET tick = 0 WHERE tick IS NULL;" >/dev/null 2>&1 || {
+            printf 'frecency: 数据库列迁移失败：%s\n' "$DB_PATH" >&2
+            return 1
+        }
+    fi
+
+    # --- v2 -> v3：书签不再是 9999 常数分 ---
+    # v2 把带 keyword 的条目抬到 PIN_BASE 起，那是与 EMS 无关的人为常数。
+    # 分数应当回归真实历史；否则取消旧版常数分后仍会凭旧分长期霸榜。
+    if [[ "$prev" == "2" ]]; then
+        run_sql "UPDATE entries SET score = 1.0 WHERE keyword != '' AND score >= 1000;" >/dev/null 2>&1 || {
+            printf 'frecency: 书签分数迁移失败：%s\n' "$DB_PATH" >&2
+            return 1
+        }
+    fi
+
+    # --- 第 3 步：索引（此时 tick 列必定已存在，否则 idx_entries_tick 会失败）---
+    run_sql "
+CREATE INDEX IF NOT EXISTS idx_entries_frecency ON entries (score DESC, last_access DESC);
+CREATE INDEX IF NOT EXISTS idx_entries_keyword ON entries (keyword) WHERE keyword != '';
+CREATE INDEX IF NOT EXISTS idx_entries_tick ON entries (tick);
+CREATE INDEX IF NOT EXISTS idx_deleted_at ON deleted_entries (deleted_at DESC);
+UPDATE meta SET v = '$SCHEMA_VERSION' WHERE k = 'schema_version';
+" >/dev/null 2>&1 || {
+        printf 'frecency: 创建数据库索引或更新 schema 版本失败：%s\n' "$DB_PATH" >&2
+        return 1
+    }
+}
+
+# 初始化/迁移由 flock 串行化。等待锁后重新检查标记，避免并发首次调用重复跑迁移。
+# 标记只有在迁移与 exp() 探测成功后才以原子 rename 写入。
+_initialize() {
+    local force="${1:-0}" lock_fd tmp_marker
+    local mv=""
+    [[ -s "$MARKER" ]] && read -r mv < "$MARKER"
+    [[ "$force" != 1 && "$mv" == "$SCHEMA_VERSION" ]] && return 0
+    if ! command -v flock >/dev/null 2>&1; then
+        printf 'frecency: 初始化需要 flock（util-linux）\n' >&2
+        return 1
+    fi
+    exec {lock_fd}>"${MARKER}.lock" || return 1
+    flock -x "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+
+    mv=""
+    [[ -s "$MARKER" ]] && read -r mv < "$MARKER"
+    if [[ "$force" == 1 || "$mv" != "$SCHEMA_VERSION" ]]; then
+        do_init || { exec {lock_fd}>&-; return 1; }
+        _require_math_functions
+        if [[ -f "$DB_PATH" ]]; then
+            tmp_marker="${MARKER}.$$"
+            if ! printf '%s\n' "$SCHEMA_VERSION" > "$tmp_marker" || ! mv -f -- "$tmp_marker" "$MARKER"; then
+                rm -f -- "$tmp_marker"
+                printf 'frecency: 无法写入数据库就绪标记：%s\n' "$MARKER" >&2
+                exec {lock_fd}>&-
+                return 1
+            fi
+        fi
+    fi
+    exec {lock_fd}>&-
+}
+
+_ensure_ready() {
+    _initialize 0
+}
+
+# exp() 需要 SQLite >= 3.35 且编译时开启 SQLITE_ENABLE_MATH_FUNCTIONS。
+# 硬性要求，不做近似退化：插值/阶梯实现复杂，且任何近似都会在档位边界
+# 制造并列、破坏 EMS 的全序（与 0.05 下限同病）。缺失时直接报错让用户升级 ——
+# 主流发行版的 sqlite3 >= 3.35 默认都带数学函数。
+_require_math_functions() {
+    [[ "$(run_sql "SELECT printf('%.4f', exp(1));" 2>/dev/null)" == "2.7183" ]] && return 0
+    printf 'frecency: 当前 sqlite3（%s）缺少数学函数 exp()，EMS 衰减无法计算。\n' \
+        "$("$SQLITE3" --version 2>/dev/null | awk '{print $1}')" >&2
+    printf '  请升级到 sqlite3 >= 3.35.0（需开启 SQLITE_ENABLE_MATH_FUNCTIONS，\n' >&2
+    printf '  主流发行版的默认构建均包含），或用 frecency-test 做部署自检。\n' >&2
+    exit 1
+}
+
+# 当前分数：把 stored 从「该条目自己的 tick」对齐到「当前 tick」。
+# 写入与读取共用同一个表达式：
+#   写入 score = <expr> + 1   （此时 meta.tick 已 +1，expr 里减去的仍是旧 tick）
+#   读取 current = <expr>     （排序 / 清理 / 展示都必须用它，而不是 stored）
+_decay_expr() {
+    local dt="((SELECT CAST(v AS INTEGER) FROM meta WHERE k = 'tick') - tick)"
+    printf 'score * exp(-%s * %s)' "$LAMBDA" "$dt"
+}
+
+do_cleanup() {
+    _ensure_ready || return 1
+    run_sql "
+DELETE FROM entries WHERE keyword = '' AND last_access < datetime('now', '-$MAX_DAYS days');
+DELETE FROM entries
+ WHERE keyword = ''
+   AND content IN (SELECT content FROM entries
+                    WHERE keyword = ''
+                    ORDER BY $(_decay_expr) DESC, last_access DESC
+                    LIMIT -1 OFFSET $MAX_ENTRIES);
+DELETE FROM deleted_entries
+ WHERE content NOT IN (SELECT content FROM deleted_entries
+                        ORDER BY deleted_at DESC LIMIT $UNDO_KEEP);
+" >/dev/null
+}
+
+# ============================================================================
+# 写入：事件时钟 + 指数衰减
+# ============================================================================
+_do_upsert() {
+    local content="$1" keyword="$2"
+    # 首次插入走的不是 ON CONFLICT 分支，起始分就是一次事件；
+    # keyword 只在查询命中时参与质量分级，也用于清理豁免；不再抬高 EMS 分数
+    run_sql "
+BEGIN IMMEDIATE;
+UPDATE meta SET v = CAST(CAST(v AS INTEGER) + 1 AS TEXT) WHERE k = 'tick';
+INSERT INTO entries (content, keyword, score, visits, tick, last_access)
+VALUES ($(sql_lit "$content"), $(sql_lit "$keyword"), 1.0, 1,
+        (SELECT CAST(v AS INTEGER) FROM meta WHERE k = 'tick'), CURRENT_TIMESTAMP)
+ON CONFLICT(content) DO UPDATE SET
+    keyword = CASE WHEN $(sql_lit "$keyword") != '' THEN $(sql_lit "$keyword") ELSE keyword END,
+    -- 不设下限：衰减到 1e-100 也只是下次 +1 时几乎等于 1；设下限反而制造并列
+    score = $(_decay_expr) + 1,
+    visits = visits + 1,
+    tick = (SELECT CAST(v AS INTEGER) FROM meta WHERE k = 'tick'),
+    last_access = CURRENT_TIMESTAMP;
+COMMIT;
+" >/dev/null
+}
+
+do_add() {
+    local content="$1" keyword="$2"
+
+    for pattern in "${IGNORE_PATTERNS[@]}"; do
+        [[ "$content" == $pattern ]] && return 0
+    done
+
+    _ensure_ready || return 1
+    _do_upsert "$content" "$keyword" || return 1
+
+    # 概率性后台维护（0.1%）
+    (( RANDOM % 1000 == 0 )) && $SELF "$TOPIC" cleanup >/dev/null 2>&1 &
+}
+
+# ============================================================================
+# 预览
+# ============================================================================
+do_preview() {
+    local content="${1##*$SEP}"     # 取最后一个字段（真正的路径/命令）
+    local db_info
+
+    # 完整路径：左侧列表列宽有限，长路径会被截断；预览区首行展开全路径。
+    # FZF_PREVIEW_COLUMNS 由 fzf 注入，fold 按预览窗宽度折行
+    # （路径通常无空格，-s 找不到空格时仍按宽度硬切）。
+    printf '%s%s%s\n' "${C_CYAN}${C_BOLD}" "--- Full Path ---" "$C_NORMAL"
+    printf '%s\n' "$content" | fold -s -w "${FZF_PREVIEW_COLUMNS:-100}"
+    printf '\n'
+
+    _ensure_ready || return 1
+
+    if [[ -f "$DB_PATH" ]]; then
+        # grade 计算：用 FZF_QUERY（fzf 自动注入的当前搜索词）复现 ORDER BY
+        # 里的 CASE WHEN 阶梯，这样 preview 显示的 grade 与实际排序完全一致。
+        # GRADE_MODE != on 或无搜索词时 grade 字段为 NULL。
+        local cur_expr=$(_decay_expr)
+        local grade_col="NULL"
+        local from_extra=""
+        if [[ "${GRADE_MODE:-on}" == "on" && -n "${FZF_QUERY:-}" ]]; then
+            local q="$FZF_QUERY"
+            local -a preview_words=()
+            read -r -a preview_words <<< "$q"
+            local last_word="${preview_words[${#preview_words[@]}-1]}"
+            from_extra=", REPLACE(content, RTRIM(content, REPLACE(content, '/', '')), '') AS last_seg"
+            grade_col=$(_query_grade_expr "$q" "$last_word" "$(_current_multiword_mode)")
+        fi
+
+        db_info=$(run_sql "
+            SELECT printf('%.4f', $cur_expr) || '$SEP' ||
+                   COALESCE(NULLIF(keyword,''), 'None') || '$SEP' ||
+                   strftime('%Y-%m-%d %H:%M:%S', last_access, 'localtime') ||
+                   '$SEP' || IFNULL(CAST(grade AS TEXT), 'NULL')
+            FROM (
+                SELECT inner.*, $grade_col AS grade
+                FROM (SELECT entries.* $from_extra FROM entries) AS inner
+            )
+            WHERE content = $(sql_lit "$content") LIMIT 1;")
+    fi
+
+    printf '%s%s%s\n' "${C_YELLOW}${C_BOLD}" "--- Metadata ---" "$C_NORMAL"
+    if [[ -n "$db_info" ]]; then
+        IFS="$SEP" read -r db_score db_key db_time db_grade <<< "$db_info"
+        printf 'EMS Score: %s%s%s | Keyword: %s%s%s | Last Access: %s\n' \
+            "$C_CYAN" "$db_score" "$C_NORMAL" "$C_GREEN" "${db_key:-None}" "$C_NORMAL" "$db_time"
+        if [[ -n "${db_grade:-}" && "${db_grade}" != "NULL" ]]; then
+            local grade_label
+            case "$db_grade" in
+                0)  grade_label="0 keyword == query (exact)" ;;
+                1)  grade_label="1 keyword starts with query" ;;
+                2)  grade_label="2 keyword contains query" ;;
+                3)  grade_label="3 last_seg == query (exact)" ;;
+                4)  grade_label="4 last_seg starts with query" ;;
+                5)  grade_label="5 last_seg contains query" ;;
+                6)  grade_label="6 middle segment starts with query" ;;
+                7)  grade_label="7 generic substring match" ;;
+                *)  grade_label="$db_grade" ;;
+            esac
+            printf 'Effective order: %s → EMS %s\n' "$grade_label" "$db_score"
+        else
+            printf 'Effective order: EMS %s  (no query grade)\n' "$db_score"
+        fi
+    else
+        printf 'Status: %sNew / Unrecorded Item%s\n' "$C_YELLOW" "$C_NORMAL"
+    fi
+    printf '\n'
+
+    _apply_highlight() {
+        local target="$1"; local limit="$2"
+        if command -v bat >/dev/null 2>&1; then
+            bat --color=always --style=plain --line-range=:"$limit" "$target"
+        elif command -v highlight >/dev/null 2>&1; then
+            highlight -O ansi --force "$target" | head -n "$limit"
+        else
+            head -n "$limit" "$target"
+        fi
+    }
+
+    if [[ -e "$content" ]]; then
+        if [[ -d "$content" ]]; then
+            printf '%s%s%s\n' "${C_BLUE}${C_BOLD}" "--- Directory Contents ---" "$C_NORMAL"
+            command -v eza >/dev/null 2>&1 \
+                && eza -a --color=always --icons --no-permissions --no-user --no-time --no-filesize "$content" | head -n 40 \
+                || ls -la --color=always "$content" | head -n 40
+        else
+            local mime=$(file --mime-type -b "$content" 2>/dev/null)
+            local desc=$(file -b "$content" 2>/dev/null)
+            if [[ "$mime" == text/* || "$desc" == *"text"* || "$desc" == *"script"* ]]; then
+                printf '%s%s%s\n' "${C_GREEN}${C_BOLD}" "--- Text Preview ---" "$C_NORMAL"
+                _apply_highlight "$content" 100
+            else
+                printf '%s%s%s\n' "${C_BLUE}${C_BOLD}" "--- Binary File Info ---" "$C_NORMAL"
+                file -b "$content"; ls -ldh "$content" | awk '{print "Size: "$5"\nPerms: "$1"\nOwner: "$3}'
+            fi
+        fi
+    else
+        local cmd_name="${content%% *}"
+        local cmd_type=$(type -t "$cmd_name" 2>/dev/null)
+        if [[ -n "$cmd_type" ]]; then
+            printf '%s%s%s\n' "${C_GREEN}${C_BOLD}" "--- Command Info ---" "$C_NORMAL"
+            printf 'Type: %s%s%s\n' "$C_CYAN" "$cmd_type" "$C_NORMAL"
+            case "$cmd_type" in
+                alias) alias "$cmd_name" 2>/dev/null || type "$cmd_name" ;;
+                file)
+                    local real_path=$(which "$cmd_name" 2>/dev/null)
+                    printf 'Binary: %s%s%s\n----------------------\n' "$C_BLUE" "$real_path" "$C_NORMAL"
+                    local r_desc=$(file -b "$real_path" 2>/dev/null)
+                    if [[ "$r_desc" == *"text"* || "$r_desc" == *"script"* ]]; then
+                        printf '%s%s%s\n' "$C_BOLD" "Script Snippet:" "$C_NORMAL"; _apply_highlight "$real_path" 30
+                    else
+                        file -b "$real_path"
+                    fi ;;
+                *) type "$cmd_name" | head -n 20 ;;
+            esac
+        else
+            printf '%s%s%s\n%s\n' "${C_BLUE}${C_BOLD}" "--- Raw Entry ---" "$C_NORMAL" "$content"
+        fi
+    fi
+}
+
+# ============================================================================
+# 查询
+# ============================================================================
+_do_internal_query() {
+    local mode="$1"; local term="$2"
+    _ensure_ready || return 1
+    # score_cur = 对齐到当前 tick 的分数。stored 分数只对各自的 tick 有效，
+    # 直接 ORDER BY score 等于比较不同时刻的分数，排出来的顺序没有意义。
+    local cur; cur=$(_decay_expr)
+    local where="" sub_extra="" grade_expr="NULL"
+    local order="ORDER BY score_cur DESC, last_access DESC"
+
+    if [[ "$mode" == "last" ]]; then
+        order="ORDER BY last_access DESC LIMIT $LAST_LIMIT"
+    elif [[ "$SEARCH_MODE" == "sqlite" && -n "$term" ]]; then
+        # 有序模式把多词合成 %foo%bar%；任意顺序模式仍逐词匹配。
+        # 两种模式都要求整组查询落在同一个字段中，不能路径命中一半、关键词命中一半。
+        local -a words=() conds=()
+        read -r -a words <<< "$term"
+        local multiword_mode; multiword_mode=$(_current_multiword_mode)
+        if [[ "$multiword_mode" == "ordered" ]]; then
+            local ordered_pattern; ordered_pattern=$(sql_like_ordered "$term")
+            where="WHERE (content LIKE $ordered_pattern ESCAPE '!' OR keyword LIKE $ordered_pattern ESCAPE '!')"
+        else
+            where="WHERE ($(_all_words_like_expr content "${words[@]}") OR $(_all_words_like_expr keyword "${words[@]}"))"
+        fi
+
+        # ---- 匹配质量分级（SEARCH_MODE=sqlite 专属；GRADE_MODE=off 时整段跳过）----
+        # 核心思路：真正要找的目标是路径的末段（最后一级文件名/目录名），
+        # 因此对末段采用与 keyword 相同的三级语义：
+        #   完全等于 > 前缀匹配 > 包含
+        # 末段没命中再退到中间段，最后才退到任意子串。
+        #
+        # grade 阶梯：
+        #   0      keyword 完全等于搜索词
+        #   1      keyword 前缀匹配
+        #   2      keyword 包含
+        #   3      末段完全等于搜索词        （/a/b/proj）
+        #   4      末段以搜索词为前缀        （/a/b/proj.conf）
+        #   5      末段包含搜索词（非前缀）   （/a/b/myprojX）
+        #   6      路径中某段以搜索词开头    （/a/proj/c/foo）
+        #   7      其他子串包含
+        #
+        # 末段提取：SQLite 无 REVERSE()，用 RTRIM 技巧 ——
+        #   REPLACE(content, '/', '') 产出去掉 / 的字符集，
+        #   RTRIM(content, 该字符集) 从右侧削去末段所有字符（遇 / 停止），
+        #   REPLACE(content, 剩余前缀, '') 提取末段。
+        if [[ "${GRADE_MODE:-on}" != "on" ]]; then
+            # 关闭分级后仅按真实 EMS 对齐分排序；关键词仍参与 WHERE 匹配。
+            order="ORDER BY score_cur DESC, last_access DESC"
+        else
+        # 多词时，最后一个词最适合用于路径末段分级。
+        local last_word="${words[${#words[@]}-1]}"
+        # 向子查询注入 last_seg 列；只在有搜索词且分级开启时才计算
+        sub_extra=", REPLACE(content, RTRIM(content, REPLACE(content, '/', '')), '') AS last_seg"
+        grade_expr=$(_query_grade_expr "$term" "$last_word" "$multiword_mode")
+        # 查询命中关键词时使用关键词档（0-2）；只命中路径时使用路径档（3-7）。
+        # 不按 keyword 非空与否额外置顶，档内再按 EMS 排序。
+        order="ORDER BY rank_grade ASC, score_cur DESC,
+               LENGTH(content) ASC, last_access DESC"
+        fi
+    fi
+    local select_sql="SELECT
+            keyword,
+            printf('%.4f', score_cur),
+            CASE
+                WHEN keyword = '' THEN printf('%-8.2f', score_cur)
+                ELSE keyword || printf('%' || MAX(0, 8 - LENGTH(keyword)) || 's', '')
+            END,
+            content,
+            $grade_expr AS rank_grade
+        FROM (SELECT entries.*, $cur AS score_cur${sub_extra} FROM entries)"
+    # 输出展示列 + 原始路径列。fzf 只展示第 1 列，接受时输出第 2 列；
+    # sqlite 模式由 SQL 搜完整路径，因此 fzf 可关闭本地过滤而不损失匹配能力。
+    run_sql "$select_sql $where $order" | FRECENCY_QUERY="$([[ "$SEARCH_MODE" == "sqlite" ]] && printf '%s' "$term")" \
+        awk -F "$SEP" -v OFS="$SEP" -v max_path_chars="$MAX_PATH_CHARS" '
+    BEGIN {
+        IGNORECASE = 1
+        query = ENVIRON["FRECENCY_QUERY"]
+        nwords = split(query, words, /[[:space:]]+/)
+        for (wi = 1; wi <= nwords; wi++) {
+            if (words[wi] == "") continue
+            nchars = split(words[wi], chars, "")
+            literal = ""
+            for (ci = 1; ci <= nchars; ci++) {
+                ch = chars[ci]
+                if (index("\\.^$|?*+()[]{}", ch)) literal = literal "\\"
+                literal = literal ch
+            }
+            match_re = match_re (match_re == "" ? "" : "|") literal
+        }
+        if (match_re != "") match_re = "(" match_re ")"
+    }
+    function highlight(value,    rest,out) {
+        if (match_re == "") return value
+        rest = value
+        out = ""
+        while (match(rest, match_re)) {
+            out = out substr(rest, 1, RSTART - 1) "\033[30;103m" \
+                  substr(rest, RSTART, RLENGTH) "\033[0m"
+            rest = substr(rest, RSTART + RLENGTH)
+        }
+        return out rest
+    }
+    function path_chars(value,    chars,n,i,total) {
+        n = split(value, chars, "")
+        total = 0
+        for (i = 1; i <= n; i++) total += (chars[i] ~ /^[\001-\177]$/ ? 1 : 2)
+        return total
+    }
+    function shorten(path, max,    parts,n,i,last,suffix,marker,marker_width,part_width,available,chars,nchars,out,width) {
+        n = split(path, parts, "/")
+        marker = ".../"
+        last = parts[n]
+        suffix = last
+
+        # 若末段自身超长，保留最右侧字符；路径宽度始终不超配置上限。
+        width = path_chars(suffix)
+        if (width + path_chars(marker) > max) {
+            available = max - path_chars("...")
+            if (available < 1) return ""
+            nchars = split(suffix, chars, "")
+            out = ""
+            width = 0
+            for (i = nchars; i > 0; i--) {
+                part_width = (chars[i] ~ /^[\001-\177]$/ ? 1 : 2)
+                if (width + part_width > available) break
+                out = chars[i] out
+                width += part_width
+            }
+            return "..." out
+        }
+
+        # 从右向左吞入完整目录段；不缩写文件名/目录名，宽度固定受 max 限制。
+        marker_width = path_chars(marker)
+        width = marker_width + path_chars(suffix)
+        for (i = n - 1; i >= 1; i--) {
+            if (parts[i] == "") continue
+            part_width = path_chars(parts[i]) + 1
+            if (width + part_width > max) break
+            suffix = parts[i] "/" suffix
+            width += part_width
+        }
+        return marker suffix
+    }
+    {
+        full = $4
+        prefix = $3
+        if ($1 != "" && match_re == "") prefix = sprintf("\033[33m%s\033[0m", prefix)
+        shown = (path_chars(full) > max_path_chars ? shorten(full, max_path_chars) : full)
+        print highlight(prefix "  " shown), full
+    }'
+}
+
+_do_internal_op() {
+    local op="$1"
+    local content="${2##*$SEP}"     # 传入的是整行，取最后一段
+    # 任何修改 stored score 的操作（add/del/undo）都必须重新走 _ensure_ready：
+    # 读标记文件（1 次 stat）确认 schema 就绪；
+    # 若宿主机 SQLite 缺少 exp() 会在此直接报错退出（无退化路径）。
+    _ensure_ready || return 1
+    case "$op" in
+        refresh)
+            _do_upsert "$content" "" &
+            ;;
+        del)
+            run_sql "
+INSERT OR REPLACE INTO deleted_entries (content, keyword, score)
+    SELECT content, keyword, score FROM entries WHERE content = $(sql_lit "$content");
+DELETE FROM entries WHERE content = $(sql_lit "$content");" >/dev/null
+            ;;
+        unbook)
+            run_sql "UPDATE entries SET keyword = '' WHERE content = $(sql_lit "$content");" >/dev/null
+            ;;
+        undo)
+            run_sql "
+INSERT OR IGNORE INTO entries (content, keyword, score, visits, tick, last_access)
+    SELECT content, keyword, score, 1,
+           (SELECT CAST(v AS INTEGER) FROM meta WHERE k='tick'), CURRENT_TIMESTAMP
+    FROM deleted_entries ORDER BY deleted_at DESC LIMIT 1;
+DELETE FROM deleted_entries WHERE content =
+    (SELECT content FROM deleted_entries ORDER BY deleted_at DESC LIMIT 1);" >/dev/null
+            ;;
+    esac
+}
+
+do_unbook() {
+    local content="$1" changed
+    [[ -n "$content" ]] || { printf 'Usage: frecency <topic> unbook <content>\n' >&2; return 2; }
+    _ensure_ready || return 1
+    changed=$(run_sql "UPDATE entries SET keyword = '' WHERE content = $(sql_lit "$content") AND keyword != ''; SELECT changes();")
+    if [[ "$changed" == "1" ]]; then
+        printf 'Bookmark removed; EMS history retained: %s\n' "$content"
+    else
+        printf 'No bookmark found: %s\n' "$content"
+    fi
+}
+
+# ============================================================================
+# UI
+# ============================================================================
+do_query_ui() {
+    _require_fzf
+    local search_term="$1"
+
+    local tmux_opt=""
+    if [[ -n "$TMUX" ]]; then
+        local _tmux_ver=$(tmux -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        if [[ -n "$_tmux_ver" ]] && awk "BEGIN{exit !($_tmux_ver >= 3.3)}" 2>/dev/null; then
+            tmux_opt="--tmux 90%,80%"
+        fi
+    fi
+
+    local P_NORMAL="${C_GREEN}${C_BOLD}● NORMAL${C_NORMAL}${C_BOLD} > "
+    local P_SEARCH="${C_BLUE}${C_BOLD}● SEARCH${C_NORMAL}${C_BOLD} > "
+    local FOOTER_HINTS="/Search  Esc Normal/Exit  d Del  r Unbook  u Undo  ↵ Accept"
+    local FOOTER_STR="$FOOTER_HINTS"
+    local SEARCH_ACTION=enable-search
+    local -a FZF_VIEW_OPTS=(--with-nth=1)
+    local INITIAL_DATA="$START_DATA" RELOAD_QUERY="all"
+    local initial_multiword_mode="${MULTIWORD_MODE:-ordered}"
+    [[ "$initial_multiword_mode" == "any-order" ]] || initial_multiword_mode="ordered"
+    local _order_file="$(mktemp "${TMPDIR:-/tmp}/frecency_order.XXXXXX")"
+    printf '%s\n' "$initial_multiword_mode" > "$_order_file"
+    local -a initial_query_words=()
+    read -r -a initial_query_words <<< "$search_term"
+    if [[ "$SEARCH_MODE" == "sqlite" && ${#initial_query_words[@]} -ge 2 ]]; then
+        [[ "$initial_multiword_mode" == "any-order" ]] \
+            && FOOTER_STR="ANY ORDER · NORMAL s→ORDERED" \
+            || FOOTER_STR="ORDERED · NORMAL s→ANY ORDER"
+    fi
+    if [[ "$SEARCH_MODE" == "sqlite" ]]; then
+        # SQL reload filters full paths; fzf must not narrow the abbreviated display field.
+        SEARCH_ACTION=disable-search
+        FZF_VIEW_OPTS+=(--disabled)
+        RELOAD_QUERY="all {q}"
+        [[ -n "$search_term" ]] && INITIAL_DATA=all
+    fi
+
+    local CORE_KEYS=(q j k h l g G c C d r u x /)
+    [[ "$SEARCH_MODE" == "sqlite" ]] && CORE_KEYS+=(s)
+    local VIM_NAV=$(IFS=,; echo "${CORE_KEYS[*]}")
+
+    local _mode_file=$(mktemp "${TMPDIR:-/tmp}/frecency_mode.XXXXXX")
+    [[ "$START_MODE" == "normal" ]] && echo "normal" > "$_mode_file" || echo "search" > "$_mode_file"
+
+    local _esc_handler="${_mode_file}.sh"
+    local _order_toggle="${_mode_file}.toggle"
+    local _footer_handler="${_mode_file}.footer"
+    cat > "$_esc_handler" <<ESCSCRIPT
+#!/bin/bash
+if [ "\$(cat "$_mode_file")" = normal ]; then
+    echo abort
+else
+    echo normal > "$_mode_file"
+    echo "disable-search+rebind($VIM_NAV)+change-prompt($P_NORMAL)"
+fi
+ESCSCRIPT
+    chmod +x "$_esc_handler"
+    cat > "$_order_toggle" <<'ORDERSCRIPT'
+#!/bin/bash
+state_file="$1"
+IFS= read -r mode < "$state_file" || mode=ordered
+if [[ "$mode" == ordered ]]; then
+    printf 'any-order\n' > "$state_file"
+else
+    printf 'ordered\n' > "$state_file"
+fi
+ORDERSCRIPT
+    cat > "$_footer_handler" <<'FOOTER_SCRIPT'
+#!/bin/bash
+query="$1"
+state_file="$2"
+search_mode="$3"
+IFS= read -r mode < "$state_file" || mode=ordered
+read -r -a words <<< "$query"
+if [[ "$search_mode" == sqlite && ${#words[@]} -ge 2 ]]; then
+    if [[ "$mode" == any-order ]]; then
+        printf '%s' 'change-footer(ANY ORDER · NORMAL s→ORDERED)'
+    else
+        printf '%s' 'change-footer(ORDERED · NORMAL s→ANY ORDER)'
+    fi
+else
+    printf '%s' 'change-footer(/Search  Esc Normal/Exit  d Del  r Unbook  u Undo  ↵ Accept)'
+fi
+FOOTER_SCRIPT
+    chmod +x "$_order_toggle" "$_footer_handler"
+    trap "rm -f '$_mode_file' '$_esc_handler' '$_order_file' '$_order_toggle' '$_footer_handler'" RETURN
+
+    local SET_SEARCH="execute-silent(echo search > '$_mode_file')"
+    local SET_NORMAL="execute-silent(echo normal > '$_mode_file')"
+
+    local START_BIND="start:$SEARCH_ACTION+unbind($VIM_NAV)+change-prompt($P_SEARCH)+$SET_SEARCH"
+    [[ "$START_MODE" == "normal" ]] && START_BIND="start:disable-search+change-prompt($P_NORMAL)+$SET_NORMAL"
+
+    local SEARCH_BIND="$SEARCH_ACTION+unbind($VIM_NAV)+change-prompt($P_SEARCH)+$SET_SEARCH"
+    [[ "$START_DATA" == "last" ]] && SEARCH_BIND="$SEARCH_BIND+transform:test -z '{q}' && echo 'reload($SELF \"$TOPIC\" internal-query all)' || echo 'nop'"
+
+    local CHANGE_BIND="first"
+    [[ "$SEARCH_MODE" == "sqlite" ]] && CHANGE_BIND="reload(sleep $SLEEP_DELAY; $SELF \"$TOPIC\" internal-query all {q} || true)+$CHANGE_BIND"
+    CHANGE_BIND+="+transform:$_footer_handler {q} '$_order_file' '$SEARCH_MODE'"
+
+    local RELOAD_AND_FILTER="reload($SELF \"$TOPIC\" internal-query $RELOAD_QUERY)+$SEARCH_ACTION+$SET_SEARCH"
+
+    local -a ORDER_MODE_BIND=()
+    if [[ "$SEARCH_MODE" == "sqlite" ]]; then
+        ORDER_MODE_BIND+=(--bind "s:execute-silent($_order_toggle '$_order_file')+reload($SELF \"$TOPIC\" internal-query all {q} || true)+transform:$_footer_handler {q} '$_order_file' '$SEARCH_MODE'")
+    fi
+
+    # fzf 调用只保留一份：两个 TERM 分支的 flags/bind 曾完全相同，双份维护
+    # 已出过一次漏改（accept-nth）。高亮在 internal-query 源头完成，直接进 fzf。
+    FRECENCY_ORDER_FILE="$_order_file" $SELF "$TOPIC" internal-query "$INITIAL_DATA" "$search_term" | \
+        FRECENCY_ORDER_FILE="$_order_file" fzf \
+            --ansi --query "$search_term" --footer "$FOOTER_STR" \
+            --layout=reverse --tiebreak='index' --no-sort $tmux_opt \
+            --preview-window=right:50% --border=rounded --inline-info \
+            --delimiter="$SEP" --accept-nth='2' "${FZF_VIEW_OPTS[@]}" --literal --exact \
+            --bind "$START_BIND" --bind "change:$CHANGE_BIND" --bind "/:$SEARCH_BIND" \
+            --bind "c:clear-query+$SEARCH_ACTION+unbind($VIM_NAV)+change-prompt($P_SEARCH)+$SET_SEARCH" \
+            --bind "x:$SEARCH_ACTION+clear-query+$SET_SEARCH" \
+            --bind "esc:transform:$_esc_handler" \
+            --bind "j:down,k:up,h:backward-char,l:forward-char,g:first,G:last,q:abort" \
+            --bind "d:execute-silent($SELF \"$TOPIC\" internal-op del {})+$RELOAD_AND_FILTER" \
+            --bind "r:execute-silent($SELF \"$TOPIC\" internal-op unbook {})+$RELOAD_AND_FILTER" \
+            --bind "u:execute-silent($SELF \"$TOPIC\" internal-op undo)+$RELOAD_AND_FILTER" \
+            --bind "C:execute-silent($SELF \"$TOPIC\" cleanup)+$RELOAD_AND_FILTER" \
+            "${ORDER_MODE_BIND[@]}" \
+            --preview "$SELF \"$TOPIC\" preview {}"
+}
+
+# ============================================================================
+# 跳转 / 输出给调用方执行
+# ============================================================================
+do_jump_handler() {
+    local term="$1" res
+    if [[ -n "$term" ]]; then
+        # zoxide / ze 语义：带查询词时跳过 fzf，直接取 EMS + 匹配质量最优的一条
+        # （internal-query 首行 = 匹配质量档位最高、档内 score_cur 最高）
+        res=$($SELF "$TOPIC" internal-query all "$term" | head -n 1)
+    else
+        res=$($SELF "$TOPIC" query) || exit 0
+    fi
+    [[ -z "$res" ]] && exit 0
+    local raw_path="${res##*$SEP}"
+
+    if [[ "$TOPIC" == "cmd" ]]; then printf '%s\n' "$raw_path"; exit 0; fi
+
+    if [[ -d "$raw_path" ]]; then
+        printf "cd '%s'\n" "$(shq "$raw_path")"
+    elif [[ -f "$raw_path" ]]; then
+        _do_internal_op "refresh" "$raw_path"
+        if [[ "$ACTION" == *"vifm" ]]; then
+            printf "goto '%s'\n" "$(shq "$raw_path")"
+        else
+            if [[ "$XDG_SESSION_TYPE" == "wayland" ]] && command -v wl-copy >/dev/null; then
+                printf '%s' "$raw_path" | wl-copy
+            elif command -v xclip >/dev/null; then
+                printf '%s' "$raw_path" | xclip -selection clipboard
+            fi
+            printf "cd '%s'; printf '%%s\\n' '%s'\n" \
+                "$(shq "$(dirname "$raw_path")")" "$(shq "Copied path: $raw_path")"
+        fi
+    else
+        if [[ "$TOPIC" == "dir" || "$TOPIC" == "file" ]]; then
+            printf '%sError:%s Path not on disk: %s\n' "$C_YELLOW" "$C_NORMAL" "$raw_path" >&2
+            exit 1
+        else
+            printf '%s\n' "$raw_path"
+        fi
+    fi
+}
+
+# ============================================================================
+# Main Router（支持 topic 用逗号分隔，一次写多库）
+# ============================================================================
+_require_sqlite3
+
+IFS=',' read -r -a TOPICS <<< "$TOPIC"
+
+for _T in "${TOPICS[@]}"; do
+    export DB_PATH="$DATA_DIR/${_T}.db"
+    export CONFIG_PATH="$DATA_DIR/${_T}.config"
+    export MARKER="$DATA_DIR/.${_T}.v3"
+
+    # topic 级配置覆盖
+    [[ -f "$CONFIG_PATH" ]] && source "$CONFIG_PATH"
+
+    case "$ACTION" in
+        init)           _initialize 1 ;;
+        cleanup)        do_cleanup ;;
+        add)            do_add "$1" "$2" ;;
+        unbook)         do_unbook "$1" ;;
+        remove)         _do_internal_op del "$1" ;;
+        query)          do_query_ui "$1" ;;
+        preview)        do_preview "$1" ;;
+        jump-handler*)  do_jump_handler "$*" ;;
+        internal-query) _do_internal_query "$1" "$2" ;;
+        internal-op)    _do_internal_op "$1" "$2" ;;
+        *)              printf 'Unknown action: %s\n' "$ACTION"; exit 1 ;;
+    esac
+done

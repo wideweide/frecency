@@ -1,0 +1,349 @@
+#!/bin/bash
+# ============================================================================
+# frecency-test - frecency 的部署自检工具（sqlite3 兼容性探测）
+# ============================================================================
+# 背景：
+#   frecency 选择 sqlite3 的顺序是「同目录下的静态二进制 > 系统 sqlite3」。
+#   部署到新服务器时，静态二进制可能因 glibc 过旧 / 架构不匹配而无法运行，
+#   系统 sqlite3 又可能版本过低（无 exp() 数学函数 / UPSERT），导致脚本静默失效
+#   （vifmrc 里是 >/dev/null 2>&1 &，错误完全不可见）。
+#
+# 本脚本做的事：
+#   1. 探测「本机实际会用到」的 sqlite3：bundled(本机架构) 优先，其次系统；
+#   2. 用真实 SQL 语句做特性探测（而不是只看版本号）；
+#   3. bundled 不兼容时直接删除该文件 -> frecency 自动回落到系统 sqlite3；
+#   4. 系统 sqlite3 也不兼容时，明确报错而不是静默失败。
+#
+# 检查分两级（很关键）：
+#   critical : 决定兼容性。失败 -> 删除 bundled / 判定不可用
+#   advisory : 提示性。失败 -> 只警告，不影响删除决策
+#       例如「特殊字符往返」是 frecency 脚本自身的已知缺陷，换任何 sqlite3
+#       都一样，不能据此删除二进制，否则会在所有机器上把 bundled 全删光。
+#
+# Usage:
+#   frecency-test                 探测，并在需要时删除不兼容的 bundled 二进制
+#   frecency-test -n|--dry-run    只报告，不删除
+#   frecency-test -v|--verbose    打印失败项的原始输出
+#   frecency-test -a|--all        顺带探测非本机架构的 bundled 二进制（只读）
+#   frecency-test -q|--quiet      不打印报告（仍写缓存、仍返回退出码）
+#   frecency-test -h|--help
+#
+# 副作用：把最终选定的 sqlite3 绝对路径写入
+#         ~/.local/share/frecency/.sqlite3.bin
+#         frecency 启动时直接读该缓存，避免每次调用都做探测。
+#         因此部署流程里跑一次本脚本即可完成「选路 + 缓存」。
+#
+# Exit code:
+#   0  最终有可用的 sqlite3（可能已降级为系统版）
+#   1  无任何可用 sqlite3，frecency 无法工作
+#   2  存在需删除的 bundled 二进制，但处于 dry-run 未删除
+#
+# 部署时建议：frecency-test -q || echo "frecency 依赖缺失" >&2
+# ============================================================================
+
+set -u
+
+SELF=$(readlink -f "$0")
+SCRIPT_DIR=$(dirname "$SELF")
+FRECENCY="$SCRIPT_DIR/frecency"
+
+DRY_RUN=0
+VERBOSE=0
+PROBE_ALL=0
+QUIET=0
+DATA_DIR="${HOME:-/tmp}/.local/share/frecency"
+CACHE="$DATA_DIR/.sqlite3.bin"
+
+# --- 最低版本要求（仅供参考，实际以特性探测为准）---
+#   3.35.0  exp() 等数学函数（需 SQLITE_ENABLE_MATH_FUNCTIONS）  <- 硬性下限
+#           frecency 已放弃无 exp() 的近似退化路径，缺失即不可用
+#   3.24.0  UPSERT (INSERT ... ON CONFLICT DO UPDATE)
+#   3.8.0   部分索引 CREATE INDEX ... WHERE ...
+#   3.7.0   WAL
+MIN_VER="3.35.0"
+
+# --- 颜色（非 tty 时自动关闭，便于 vifm system() 调用）---
+if [[ -t 1 ]]; then
+    C_0=$'\e[0m'; C_B=$'\e[1m'; C_G=$'\e[32m'; C_Y=$'\e[33m'; C_R=$'\e[31m'; C_C=$'\e[36m'; C_D=$'\e[2m'
+else
+    C_0=""; C_B=""; C_G=""; C_Y=""; C_R=""; C_C=""; C_D=""
+fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n|--dry-run) DRY_RUN=1; shift ;;
+        -v|--verbose) VERBOSE=1; shift ;;
+        -a|--all)     PROBE_ALL=1; shift ;;
+        -q|--quiet)   QUIET=1; shift ;;
+        -h|--help)    sed -n '2,50p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "Unknown option: $1 (try --help)" >&2; exit 1 ;;
+    esac
+done
+
+# 静默模式只关 stdout，stderr（真正的错误）仍然输出
+[[ $QUIET -eq 1 ]] && exec >/dev/null
+
+TMPD=$(mktemp -d "${TMPDIR:-/tmp}/frecency-test.XXXXXX")
+trap 'rm -rf "$TMPD"' EXIT
+
+# --- 架构探测：必须与 frecency 保持一致 ---
+detect_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64)  echo "x86_64" ;;
+        aarch64|arm64) echo "arm64"  ;;
+        *)             echo ""       ;;
+    esac
+}
+ARCH=$(detect_arch)
+
+ver2num() { awk -F. '{printf "%d", ($1*1000000)+($2*1000)+$3}' <<< "${1}"; }
+
+declare -a FAILED_CRIT=()
+declare -a FAILED_ADV=()
+declare -a ADV_DETAIL=()
+PROBE_VER=""
+
+# 执行 SQL（走 stdin，避免 heredoc 的 shell 展开干扰判定）
+# 用法: run_sql <bin> <db> <sql>  -> 成功返回 0，设置 OUT / ERR
+OUT=""; ERR=""
+run_sql() {
+    local bin="$1" db="$2" sql="$3"
+    local errf="$TMPD/.err"
+    OUT=$(printf '%s\n' "$sql" | "$bin" -batch -list -init /dev/null "$db" 2>"$errf")
+    local rc=$?
+    ERR=$(tr -d '\r' < "$errf")
+    [[ $rc -eq 0 && -z "$ERR" ]]
+}
+
+# ============================================================================
+# 单个二进制的探测
+# ============================================================================
+probe_bin() {
+    local bin="$1"
+    local db="$TMPD/probe_$(basename "$bin" | tr -c 'A-Za-z0-9' '_').db"
+    rm -f "$db" "$db-wal" "$db-shm"
+
+    FAILED_CRIT=(); FAILED_ADV=(); ADV_DETAIL=(); PROBE_VER=""
+    local ver out
+
+    # --- 0. 是否可执行 ---
+    if [[ ! -x "$bin" ]]; then
+        FAILED_CRIT+=("不可执行（缺少 +x 或文件不存在）")
+        return 1
+    fi
+    ver=$("$bin" --version 2>/dev/null | awk '{print $1}')
+    if [[ -z "$ver" ]]; then
+        FAILED_CRIT+=("无法启动（常见于 glibc 版本过旧或架构不匹配）")
+        ADV_DETAIL+=("$("$bin" --version 2>&1 | head -n 2 | tr '\n' '|')")
+        return 1
+    fi
+    PROBE_VER="$ver"
+
+    # --- 1. 版本下限（critical，快速筛选）---
+    if [[ $(ver2num "$ver") -lt $(ver2num "$MIN_VER") ]]; then
+        FAILED_CRIT+=("版本 $ver < $MIN_VER（缺少 exp() 数学函数等能力）")
+        return 1
+    fi
+
+    # --- 2. WAL ---
+    if out=$("$bin" -batch -init /dev/null "$db" "PRAGMA journal_mode=WAL;" 2>&1) && [[ "$out" == "wal" ]]; then
+        :
+    else
+        FAILED_CRIT+=("WAL 不可用（返回: ${out:-空}）")
+        ADV_DETAIL+=("$out")
+    fi
+
+    # --- 3. 建表 + 部分索引 ---
+    run_sql "$bin" "$db" "
+        CREATE TABLE IF NOT EXISTS entries (
+            content TEXT PRIMARY KEY,
+            keyword TEXT DEFAULT '',
+            score INTEGER DEFAULT 1,
+            last_access DATETIME DEFAULT CURRENT_TIMESTAMP);
+        CREATE INDEX IF NOT EXISTS ix1 ON entries (score DESC, last_access DESC);
+        CREATE INDEX IF NOT EXISTS ix2 ON entries (keyword) WHERE keyword != '';" \
+        || { FAILED_CRIT+=("建表 / 部分索引失败"); ADV_DETAIL+=("$ERR"); }
+
+    # --- 4. UPSERT（frecency 的 do_add 核心语句）---
+    run_sql "$bin" "$db" "
+        INSERT INTO entries (content, keyword, score) VALUES ('/a', 'kw', 1)
+        ON CONFLICT(content) DO UPDATE SET
+            keyword = CASE WHEN 'kw' != '' THEN 'kw' ELSE keyword END,
+            score   = CASE WHEN 'kw' != '' THEN MAX(score, 9999) + 1 ELSE score + 1 END,
+            last_access = CURRENT_TIMESTAMP;" \
+        || { FAILED_CRIT+=("UPSERT (ON CONFLICT DO UPDATE) 不支持"); ADV_DETAIL+=("$ERR"); }
+
+    # --- 5. 展示层用到的函数（printf / char / strftime localtime / LIKE 拼接）---
+    run_sql "$bin" "$db" "
+        SELECT printf('%-12d', score) || char(27) || '[33m' || keyword || char(27) || '[0m'
+               || strftime('%Y-%m-%d %H:%M:%S', last_access, 'localtime')
+        FROM entries
+        WHERE content LIKE '%' || 'a' || '%' OR keyword LIKE '%' || 'a' || '%';" \
+        || { FAILED_CRIT+=("printf/char/strftime/LIKE 执行出错"); ADV_DETAIL+=("$ERR"); }
+
+    # --- 6. 特殊字符往返（critical）---
+    #     frecency 现在用「单引号字面量 + '' 转义」传值，这是唯一依赖的传参机制。
+    #     必须验证含 双引号 / 反斜杠 / 单引号 / 反引号 / 中文 的路径能原样写入并读回。
+    local -a tricky_vals=(
+        '/opt/we"ird\back\slash 文件.pdf'
+        "/opt/it's a file.md"
+        '/opt/a$b`c.pdf'
+    )
+    local v esc bad=0
+    for v in "${tricky_vals[@]}"; do
+        esc=${v//\'/\'\'}
+        out=$("$bin" -batch -list -init /dev/null "$db" \
+              "INSERT OR REPLACE INTO entries(content) VALUES('$esc');
+               SELECT content FROM entries WHERE content='$esc';" 2>&1)
+        if [[ "$out" != "$v" ]]; then
+            bad=1
+            ADV_DETAIL+=("往返失败: 期望[$v] 实际[$out]")
+        fi
+    done
+    [[ $bad -eq 0 ]] || FAILED_CRIT+=("特殊字符路径往返失败（单引号字面量转义异常）")
+
+    # --- 7. exp() 数学函数（critical：frecency 的 EMS 衰减硬依赖，无退化路径）---
+    out=$("$bin" -batch -list -init /dev/null "$db" "SELECT printf('%.4f', exp(1));" 2>&1)
+    [[ "$out" == "2.7183" ]] || {
+        FAILED_CRIT+=("exp() 不可用（需 SQLite >= 3.35 且开启 SQLITE_ENABLE_MATH_FUNCTIONS）")
+        ADV_DETAIL+=("$out")
+    }
+
+    # --- 8. LIMIT -1 OFFSET n（do_cleanup 用到）---
+    run_sql "$bin" "$db" \
+        "SELECT content FROM entries ORDER BY score DESC LIMIT -1 OFFSET 1;" \
+        || { FAILED_CRIT+=("LIMIT -1 OFFSET n 不支持"); ADV_DETAIL+=("$ERR"); }
+
+    [[ ${#FAILED_CRIT[@]} -eq 0 ]]
+}
+
+report_bin() {
+    local bin="$1"; local label="$2"
+    printf '%s%s%s %s(%s)%s\n' "$C_B" "$label" "$C_0" "$C_D" "$bin" "$C_0"
+    [[ -n "$PROBE_VER" ]] && printf '  版本      %s\n' "$PROBE_VER"
+    if [[ ${#FAILED_CRIT[@]} -gt 0 ]]; then
+        for f in "${FAILED_CRIT[@]}"; do printf '  %s✗ [critical]%s %s\n' "$C_R" "$C_0" "$f"; done
+        printf '  %s✗ 不兼容%s\n' "$C_R" "$C_0"
+    elif [[ ${#FAILED_ADV[@]} -gt 0 ]]; then
+        printf '  %s✓ critical 全通过（有 advisory 提示）%s\n' "$C_G" "$C_0"
+    else
+        printf '  %s✓ 全部检查通过%s\n' "$C_G" "$C_0"
+    fi
+    if [[ ${#FAILED_ADV[@]} -gt 0 ]]; then
+        for f in "${FAILED_ADV[@]}"; do printf '  %s! [advisory]%s %s\n' "$C_Y" "$C_0" "$f"; done
+    fi
+    if [[ $VERBOSE -eq 1 && ${#ADV_DETAIL[@]} -gt 0 ]]; then
+        for d in "${ADV_DETAIL[@]}"; do printf '%s      raw: %s%s\n' "$C_D" "$d" "$C_0"; done
+    fi
+    echo
+}
+
+# ============================================================================
+# 主流程
+# ============================================================================
+NEED_DELETE=0
+echo
+printf '%sfrecency sqlite3 兼容性自检%s\n' "$C_B" "$C_0"
+printf '%s主机架构: %s   脚本目录: %s   最低版本: %s%s\n' "$C_D" "$(uname -m)" "$SCRIPT_DIR" "$MIN_VER" "$C_0"
+[[ -x "$FRECENCY" ]] || printf '%s! 未找到可执行的 frecency: %s%s\n' "$C_Y" "$FRECENCY" "$C_0"
+echo
+
+BUNDLED=""
+if [[ -n "$ARCH" ]]; then
+    # 仓库布局为 bundled/sqlite3-<arch>；安装到 vifm scripts/ 时平铺为 sqlite3-<arch>
+    BUNDLED="$SCRIPT_DIR/sqlite3-$ARCH"
+    [[ -e "$BUNDLED" ]] || BUNDLED="$SCRIPT_DIR/bundled/sqlite3-$ARCH"
+fi
+
+# --- 1. 探测 bundled ---
+BUNDLED_OK=1
+if [[ -n "$BUNDLED" && -e "$BUNDLED" ]]; then
+    probe_bin "$BUNDLED"; BUNDLED_OK=$?
+    report_bin "$BUNDLED" "bundled 静态二进制"
+
+    if [[ $BUNDLED_OK -ne 0 ]]; then
+        if [[ $DRY_RUN -eq 1 ]]; then
+            printf '%s[dry-run]%s 应删除不兼容的二进制: %s\n\n' "$C_Y" "$C_0" "$BUNDLED"
+            NEED_DELETE=1
+        elif rm -f "$BUNDLED"; then
+            printf '%s已删除%s 不兼容的二进制: %s\n' "$C_Y" "$C_0" "$BUNDLED"
+            printf '%s        -> frecency 将回落到系统 sqlite3%s\n\n' "$C_D" "$C_0"
+        else
+            printf '%s删除失败%s（无写权限？）: %s\n\n' "$C_R" "$C_0" "$BUNDLED"
+        fi
+    fi
+elif [[ -n "$ARCH" ]]; then
+    printf '%sbundled 静态二进制不存在（%s），将使用系统 sqlite3%s\n\n' "$C_D" "$BUNDLED" "$C_0"
+else
+    printf '%s! 未知架构 %s，bundled 二进制不会被使用%s\n\n' "$C_Y" "$(uname -m)" "$C_0"
+fi
+
+# --- 2. 探测系统 sqlite3 ---
+SYS_BIN=""; SYS_OK=1
+if command -v sqlite3 >/dev/null 2>&1; then
+    SYS_BIN=$(command -v sqlite3)
+    probe_bin "$SYS_BIN"; SYS_OK=$?
+    report_bin "$SYS_BIN" "系统 sqlite3"
+else
+    printf '%s✗ 系统 PATH 中找不到 sqlite3%s\n\n' "$C_R" "$C_0"
+fi
+
+# --- 3. 顺带探测其它架构的 bundled（只读，从不删除）---
+if [[ $PROBE_ALL -eq 1 ]]; then
+    for f in "$SCRIPT_DIR"/sqlite3-* "$SCRIPT_DIR"/bundled/sqlite3-*; do
+        [[ -e "$f" ]] || continue
+        [[ -n "$BUNDLED" && "$f" == "$BUNDLED" ]] && continue
+        printf '%s-- 附加探测（非本机架构，只读，绝不删除）: %s%s\n' "$C_D" "$(basename "$f")" "$C_0"
+        probe_bin "$f"
+        report_bin "$f" "$(basename "$f")"
+    done
+fi
+
+# ============================================================================
+# 环境提示：awk 的 UTF-8 感知（advisory，不影响退出码与删除决策）
+# ============================================================================
+# frecency 列表路径按「显示宽度」缩写：ASCII 计 1、非 ASCII 计 2。
+# gawk 在 UTF-8 locale 下按字符切分（"中" -> 1 字符）；mawk 按字节切分
+# （"中" -> 3 字节），中文按 3 字节 x2 = 6 宽计数，列表会提前缩写
+# （功能不坏，仅体验劣化）。此机若 awk 指向 mawk 建议安装 gawk。
+AWK_BIN=$(command -v awk 2>/dev/null)
+if [[ -n "$AWK_BIN" ]] && ! LC_ALL=en_US.UTF-8 awk 'BEGIN { exit !(split("中", a, "") == 1) }' 2>/dev/null; then
+    printf '%s! [advisory]%s awk 非 UTF-8 感知（mawk?）: %s\n' "$C_Y" "$C_0" "$AWK_BIN"
+    printf '         中文路径宽度将按字节计（3x），列表提前缩写。建议: 安装 gawk\n\n'
+fi
+
+# ============================================================================
+# 结论
+# ============================================================================
+printf '%s结论%s\n' "$C_B" "$C_0"
+FINAL=0
+EFFECTIVE=""
+# 优先级必须与 frecency 的 _resolve_sqlite3 一致：
+#   系统版（通过探测）优先 —— 实测启动快 10 倍以上；bundled 仅作兜底。
+if [[ $SYS_OK -eq 0 ]]; then
+    printf '  生效: %s系统 sqlite3%s  %s\n' "$C_G" "$C_0" "$SYS_BIN"
+    EFFECTIVE="$SYS_BIN"
+elif [[ -n "$BUNDLED" && $BUNDLED_OK -eq 0 && -x "$BUNDLED" ]]; then
+    printf '  生效: %sbundled%s  %s\n' "$C_G" "$C_0" "$BUNDLED"
+    printf '  %s(系统 sqlite3 不可用或不达标，已用 bundled 兜底)%s\n' "$C_D" "$C_0"
+    EFFECTIVE="$BUNDLED"
+else
+    printf '  %s✗ 没有任何可用的 sqlite3，frecency 将无法工作%s\n' "$C_R" "$C_0"
+    printf '    建议: 安装 sqlite3 >= %s，或放入可用的静态二进制 %s\n' \
+        "$MIN_VER" "${BUNDLED:-$SCRIPT_DIR/sqlite3-<arch>}"
+    FINAL=1
+fi
+
+# 写入选择缓存：frecency 启动时直接读，避免每次调用重复探测
+if [[ -n "$EFFECTIVE" ]]; then
+    mkdir -p "$DATA_DIR" 2>/dev/null
+    if printf '%s' "$EFFECTIVE" > "$CACHE" 2>/dev/null; then
+        printf '  %s已写入缓存: %s%s\n' "$C_D" "$CACHE" "$C_0"
+    else
+        printf '  %s! 无法写入缓存（不影响使用，但每次调用会多一次探测）: %s%s\n' "$C_Y" "$CACHE" "$C_0"
+    fi
+fi
+
+[[ $NEED_DELETE -eq 1 ]] && FINAL=2
+echo
+exit $FINAL
