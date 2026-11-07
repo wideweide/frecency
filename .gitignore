@@ -1,0 +1,6 @@
+# Runtime leftovers
+nvim.log
+
+# Editor / system noise
+*.swp
+.DS_Store

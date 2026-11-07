@@ -3,7 +3,8 @@
 # ============================================================================
 # #frecency for bash
 #
-# Requires frecency and bmark.sh on PATH (normally ~/.config/vifm/scripts).
+# Requires `frecency` on PATH: install.sh creates a ~/.local/bin symlink for
+# this (--register / --bin-link).
 # Loaded from ~/.bashrc:
 #     source ~/.config/frecency/frecency.bash
 #

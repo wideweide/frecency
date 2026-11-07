@@ -3,15 +3,16 @@
 # frecency-test - deployment self-check for frecency (sqlite3 compatibility probe)
 # ============================================================================
 # Background:
-#   frecency resolves sqlite3 in this order: a static binary in the same directory,
-#   then the system sqlite3. On a new server the static binary may fail to run
-#   (old glibc / wrong architecture), while the system sqlite3 may be too old
-#   (no exp() math functions / no UPSERT), causing silent failures (vifmrc runs
-#   commands with >/dev/null 2>&1 &, so errors are invisible).
+#   frecency resolves sqlite3 in this order: selection cache > system sqlite3
+#   (when adequate) > bundled static binary. On a new server the static binary
+#   may fail to run (old glibc / wrong architecture), while the system sqlite3
+#   may be too old (no exp() math functions / no UPSERT), causing silent
+#   failures (vifmrc runs commands with >/dev/null 2>&1 &, so errors are
+#   invisible).
 #
 # What this script does:
-#   1. Probe the sqlite3 this machine will actually use: bundled (native arch)
-#      first, then the system version;
+#   1. Probe the sqlite3 this machine will actually use: the system version
+#      first, then the bundled (native arch) fallback;
 #   2. Probe features with real SQL statements (not just version numbers);
 #   3. If bundled is incompatible, delete that file -> frecency falls back to
 #      the system sqlite3;

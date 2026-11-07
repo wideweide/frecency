@@ -10,10 +10,12 @@
 -- Records opened files into the shared `file` topic, the same database the
 -- vifm and shell integrations use.
 --
--- Deduplication: vifm records a file when it is opened with l/<CR>. When the
--- database was updated within the last 5 seconds, this visit is assumed to be
--- the same navigation and is skipped instead of counted twice
--- ("frecency file recent 5" performs the check).
+-- Deduplication: vifm records a file when it is opened with l/<CR>. When this
+-- exact path was recorded within the last 5 seconds, the visit is assumed to
+-- be the same navigation and is skipped instead of counted twice
+-- ("frecency file recent 5 <path>" performs the check; matching the path
+-- precisely keeps unrelated writes such as a DirEnter directory change from
+-- swallowing this record).
 --
 -- Requires `frecency` on PATH (normally ~/.config/vifm/scripts).
 
@@ -50,10 +52,10 @@ local function absolute_input_path(path)
     return cwd .. "/" .. path
 end
 
--- Record a file unless the database was updated recently, which means vifm
--- already logged this navigation through its l/<CR> mappings.
+-- Record a file unless this exact path was recorded recently, which means
+-- vifm already logged this navigation through its l/<CR> mappings.
 local function record(path)
-    vim.fn.jobstart({ "frecency", "file", "recent", "5" }, {
+    vim.fn.jobstart({ "frecency", "file", "recent", "5", path }, {
         on_exit = function(_, code)
             if code ~= 0 then
                 vim.fn.jobstart({ "frecency", "file", "add", path })

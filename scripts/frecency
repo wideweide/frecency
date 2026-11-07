@@ -36,8 +36,10 @@
 #    frecency <topic> query [search_term]      : open the fzf UI
 #    frecency <topic> jump-handler [term]      : shell / vifm integration
 #    frecency <topic> remove <content>         : delete an entry (undoable)
-#    frecency <topic> recent <seconds>         : exit 0 if any entry was updated
-#                                                within the last N seconds
+#    frecency <topic> recent <seconds> [content]
+#                                              : exit 0 if the entry <content>
+#                                                (any entry when omitted) was
+#                                                updated within the last N seconds
 #    frecency <topic> cleanup                  : manual maintenance
 #
 # The generic interface accepts comma-separated topics; the Vifm/Fish/Neovim
@@ -45,7 +47,7 @@
 #    frecency topic-a,topic-b add /path/to/x
 #
 # Dependencies:
-#    - Core: bash (4.4+), sqlite3 (>=3.35.0 with exp()), fzf (>=0.35.0), file,
+#    - Core: bash (4.4+), sqlite3 (>=3.35.0 with exp()), fzf (>=0.48.0), file,
 #      coreutils, flock
 #    - Optional: eza (directory preview), bat / highlight (syntax highlighting)
 #    - Deployment self-check: frecency-test (writes the sqlite3 selection cache)
@@ -326,9 +328,9 @@ _require_fzf() {
     fi
     # Version gate: requires 0.48+ features (--accept-nth / change-footer / rebind / --tmux).
     local v; v=$(fzf --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
-    if [[ -n "$v" ]] && (( $(_ver_num "$v") < $(_ver_num "$FZF_MIN_VER") )); then
+    if [[ -n "$v" ]] && (( $(_ver_num "$v") < $(_ver_num "$_FZF_MIN") )); then
         printf 'frecency: fzf %s is too old; need >= %s (--accept-nth / change-footer / rebind)\n' \
-            "$v" "$FZF_MIN_VER" >&2
+            "$v" "$_FZF_MIN" >&2
         exit 127
     fi
 }
@@ -533,19 +535,23 @@ do_add() {
     (( RANDOM % 1000 == 0 )) && $SELF "$TOPIC" cleanup >/dev/null 2>&1 &
 }
 
-# recent <seconds>: succeed if any entry was updated within the last N seconds.
-# Used by the Neovim integration to skip a duplicate record right after vifm's
-# own DirEnter/open hook has already written the same navigation.
+# recent <seconds> [content]: succeed if the entry <content> — or any entry
+# when omitted — was updated within the last N seconds. Used by the Neovim
+# integration to skip a duplicate record right after vifm's own open hook has
+# already written the same file; matching the exact path keeps unrelated writes
+# (e.g. a DirEnter directory change) from swallowing the record.
 do_recent() {
-    local seconds="${1:-5}"
+    local seconds="${1:-5}" content="${2:-}"
     [[ "$seconds" =~ ^[0-9]+$ ]] || {
         printf 'frecency: recent requires a whole number of seconds: %s\n' "$seconds" >&2
         return 2
     }
     _ensure_ready || return 1
+    local where=""
+    [[ -n "$content" ]] && where="AND content = $(sql_lit "$content")"
     local hit
     hit=$(run_sql "SELECT 1 FROM entries
-                   WHERE last_access >= datetime('now', '-$seconds seconds')
+                   WHERE last_access >= datetime('now', '-$seconds seconds') $where
                    LIMIT 1;")
     [[ -n "$hit" ]]
 }
@@ -1075,7 +1081,7 @@ for _T in "${TOPICS[@]}"; do
         add)            do_add "$1" "$2" ;;
         unbook)         do_unbook "$1" ;;
         remove)         _do_internal_op del "$1" ;;
-        recent)         do_recent "$1" ;;
+        recent)         do_recent "$1" "$2" ;;
         query)          do_query_ui "$1" ;;
         preview)        do_preview "$1" ;;
         jump-handler*)  do_jump_handler "$*" ;;

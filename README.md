@@ -48,7 +48,8 @@ frecency.vifm       vifm integration                   -> ~/.config/vifm/frecenc
 shell/frecency.fish fish integration                   -> ~/.config/fish/frecency.fish
 shell/frecency.bash bash integration                    -> ~/.config/frecency/frecency.bash
 nvim/frecency.lua   neovim integration                  -> ~/.config/nvim/frecency/frecency.lua
-bundled/            static sqlite3 binaries            -> flattened into vifm scripts/
+bundled/            static sqlite3 binaries            -> native-arch binary into vifm scripts/
+scripts/frecency    symlink                             -> ~/.local/bin/frecency (opt-in)
 ```
 
 ## Install
@@ -56,9 +57,10 @@ bundled/            static sqlite3 binaries            -> flattened into vifm sc
 ```bash
 git clone <repo-url> frecency
 cd frecency
-./install.sh                 # interactive menu on a TTY; plain install otherwise
-./install.sh --register      # install and register everything
+./install.sh                 # interactive menu on a TTY; files-only install otherwise
+./install.sh --register      # install and register everything (incl. the bin symlink)
 ./install.sh --no-register   # install files only
+./install.sh --bin-link      # also create the ~/.local/bin symlink
 ./install.sh --dry-run       # preview every action
 ./install.sh --vifm-dir DIR  # custom vifm directory (default: $XDG_CONFIG_HOME/vifm)
 ./install.sh --unregister    # show and remove registered source lines
@@ -73,16 +75,25 @@ frecency installer
   vifm dir: ~/.config/vifm
 
   1) Install and register everything (recommended)
-  2) Install files only (skip registration)
-  3) Unregister (remove source lines)
-  4) Uninstall (remove installed files)
-  5) Dry-run: preview install + register
+  2) Install, choosing each integration individually
+  3) Install files only (skip registration)
+  4) Unregister (remove source lines)
+  5) Uninstall (remove installed files)
+  6) Dry-run: preview install + register
   q) Quit
 Choice [1]:
 ```
 
-The vifm scripts (`frecency`, `bmark.sh`) must be on `PATH`. The installer
-registers a marked `source` line in `vifmrc`:
+Without a TTY (e.g. `curl ... | bash`), the installer only copies files and
+touches nothing else; every write is opt-in via `--register` / `--bin-link`.
+
+Only the native-architecture sqlite3 binary is installed. The installer can
+also create a `~/.local/bin/frecency` symlink so the script is reachable from
+any shell (bash, fish, zsh, ...) without further `PATH` setup; vifm itself
+adds its `scripts/` directory to `PATH` automatically, so `bmark.sh` needs no
+configuration.
+
+The installer registers a marked `source` line in `vifmrc`:
 
 ```vim
 " #frecency for vifm
@@ -95,12 +106,12 @@ file untouched and tells you to compare it manually — or delete the old block
 and run `--register` again. `--unregister` prints the exact lines it will
 remove before changing anything.
 
-Fish, bash and Neovim integrations are installed and registered automatically
-when the corresponding shell or `init.lua` is detected, using the same marker
-mechanism (a marked `source` line for the shells, a marked `dofile()` for
-Neovim). Before registering vifm, the installer also scans `vifmrc` for
-existing mappings of the keys `frecency.vifm` redefines and prints a
-non-blocking warning for each conflict.
+Fish, bash and Neovim integrations are installed and registered when the
+corresponding shell or `init.lua` is detected (menu choice 2 lets you pick
+each one individually), using the same marker mechanism (a marked `source`
+line for the shells, a marked `dofile()` for Neovim). Before registering
+vifm, the installer also scans `vifmrc` for existing mappings of the keys
+`frecency.vifm` redefines and prints a non-blocking warning for each conflict.
 
 > **Why not a vifm plugin?** vifm's `plugins/` directory only loads Lua
 > plugins (`plugins/<name>/init.lua`); a `.vifm` script there is never sourced
@@ -157,6 +168,8 @@ Both integrations are installed by `install.sh` and provide:
 - fish only: `Alt-T` inserts a history path at the command line and copies it
 
 Directories and files share one database (topic `file`), so `j` works for both.
+They only need `frecency` on `PATH` — the `~/.local/bin` symlink created by
+`--register` / `--bin-link` covers this.
 
 Load manually if needed:
 
@@ -180,10 +193,11 @@ dofile("/home/youruser/.config/nvim/frecency/frecency.lua")
 
 It records opened files into the shared `file` topic. vifm already records a
 file when `l`/`<CR>` opens it, so before adding an entry the integration asks
-the database whether anything changed in the last 5 seconds
-(`frecency file recent 5`) and skips the record in that case, preventing the
-same navigation from being counted twice. New files (`BufNewFile`) are always
-recorded since vifm cannot have seen them.
+the database whether **this exact path** was recorded in the last 5 seconds
+(`frecency file recent 5 <path>`) and skips the record in that case,
+preventing the same navigation from being counted twice while unrelated
+writes (such as a directory change) do not suppress it. New files
+(`BufNewFile`) are always recorded since vifm cannot have seen them.
 
 ## Configuration
 
@@ -216,7 +230,7 @@ frecency <topic> query [term]               # open the fzf UI
 frecency <topic> jump-handler [term]        # best match / fzf picker -> cd command
 frecency <topic> jump-handler-vifm [term]   # same, vifm flavour (goto)
 frecency <topic> remove <content>           # delete (undoable in the UI)
-frecency <topic> recent <seconds>           # exit 0 if anything changed recently
+frecency <topic> recent <seconds> [content] # exit 0 if content (or anything) changed recently
 frecency <topic> cleanup                    # prune by MAX_ENTRIES / MAX_DAYS
 ```
 

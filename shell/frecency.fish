@@ -3,7 +3,9 @@
 # ============================================================================
 # #frecency for fish
 #
-# Requires frecency and bmark.sh on PATH (normally ~/.config/vifm/scripts).
+# Requires `frecency` on PATH: install.sh creates a ~/.local/bin symlink for
+# this (--register / --bin-link). vifm itself adds ~/.config/vifm/scripts to
+# PATH automatically; bmark.sh is only ever called from vifm.
 # Loaded from config.fish:
 #     source ~/.config/fish/frecency.fish
 #
