@@ -1,25 +1,69 @@
 " ============================================================================
-" frecency.vifm — frecency 的 vifm 薄插件封装
+" frecency.vifm - thin Vifm plugin for frecency
 " ============================================================================
-" 说明：vifm 的 plugins/ 目录只支持 Lua 插件（init.lua），vifmscript 文件
-" 放在那里不会被加载且会报 [failed]。因此本"插件"放在 scripts/ 下与脚本
-" 同住，由 vifmrc 中一行 `:source` 显式加载：
-"     source ~/.config/vifm/scripts/frecency.vifm
-" 停用 = 注释掉 vifmrc 里的那行 source。
-" 脚本本体保留在原路径 ~/.config/vifm/scripts/frecency（含全部逻辑）。
+" #frecency for vifm
 "
-" o 与 O 互为补充：
-"   o  全局历史库（file topic）——EMS + 匹配质量分级的 fzf 检索跳转
-"      （带词直接跳最优，无词弹 fzf）
-"   O  当前目录树——fzf --walker 的文件浏览（无历史排序），指定 bash 执行，
-"      避免受 vifm 运行时 shell（fish）语法影响
+" Vifm only auto-loads Lua plugins from plugins/ (init.lua); a Vifmscript file
+" placed there is not loaded and reports [failed]. This file therefore lives at
+" ~/.config/vifm/frecency.vifm and is loaded explicitly from vifmrc:
+"
+"     source ~/.config/vifm/frecency.vifm
+"
+" The executable scripts live in ~/.config/vifm/scripts/ and must be on PATH:
+"     frecency     main script
+"     bmark.sh     bookmark bridge (creates a Vifm bookmark as well)
+"
+" To disable, comment out the source line in vifmrc.
+"
+" o and O complement each other:
+"   o  global history (file topic) - fzf jump ordered by EMS and match grade
+"      (with a query it jumps directly to the best match; without one it opens fzf)
+"   O  current directory tree - fzf --walker file browser with no history order,
+"      executed by bash so Vifm's runtime shell (fish) syntax is not involved
 
-" --- o: 从历史库按 EMS 优先跳转 ---
+" --- 1. Core commands (silent, asynchronous, never block the UI) ---
+
+" trackPath: record the current directory in the shared `file` topic.
+" With an argument it is stored as a keyword; otherwise as a normal entry.
+" %d is the absolute directory path, %a is the optional keyword.
+command! trackPath !frecency file add "%d" %a >/dev/null 2>&1 &
+
+" trackFile: record a file in the `file` topic only. %a is the optional keyword.
+command! trackFile
+    \ ! [ ! -d "%d/%f" ] && frecency file add "%d/%f" %a >/dev/null 2>&1 &
+
+" Remove the current path from the shared `file` topic
+command! removeRecord
+    \ !frecency file remove "%d/%f" >/dev/null 2>&1 &
+
+" Enhanced bookmark: call the external script to update the DB and Vifm bookmarks
+command! Bmark : execute '!bmark.sh %d/%f %a &'
+
+" --- 2. Automatic hook (autocmd) ---
+" Every directory change silently records the directory in `file`
+autocmd DirEnter *,.* trackPath
+
+" --- 3. File operation mappings ---
+" <silent> hides the command in the status bar
+
+" Open: record first, then run the original action
+nnoremap <silent> l :trackFile<cr>l
+nnoremap <silent> <cr> :trackFile<cr><cr>
+
+" Delete: remove the entry first, then run the original delete
+nnoremap <silent> dd :removeRecord<cr>dd
+
+" Create a bookmark (keyword)
+nnoremap M :Bmark<space>
+
+" --- 4. Interactive jumping (o / O) ---
+
+" o: jump to a directory or file from the history database
 nnoremap <silent> o :set noquickview |
     \ let $JUMP_CMD = system('frecency file jump-handler-vifm') |
     \ if $JUMP_CMD != '' | execute $JUMP_CMD | endif <cr>
 
-" --- O: fzf 浏览当前目录树（含隐藏文件），与 o 的历史库检索互补 ---
+" O: run fzf with bash explicitly so Vifm's configured fish syntax is not involved
 nnoremap <silent> O :set noquickview |
     \ let $FZF_ROOT = expand('%d') |
     \ let $FZF_SELECTED = system("bash -c 'unset FZF_DEFAULT_COMMAND; exec fzf --scheme=path --walker=file,hidden --walker-root=\"$FZF_ROOT\" </dev/tty 2>/dev/tty'") |

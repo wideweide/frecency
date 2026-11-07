@@ -5,8 +5,8 @@ scoring (event clock + exponential moving sum), powered by bash, SQLite and
 [fzf](https://github.com/junegunn/fzf).
 
 It tracks **directories and files** in one database, ranks them by a
-time-decayed usage score, and lets you jump to any of them from a modal fzf
-UI with live preview — inside vifm, from your shell, or over a tmux popup.
+time-decayed usage score, and lets you jump to any of them from a modal fzf UI
+with live preview — inside vifm, from your shell, or over a tmux popup.
 
 ## Why not zoxide?
 
@@ -40,57 +40,85 @@ only ticks on real navigation events, not on wall time).
 - gawk recommended (mawk counts CJK paths in bytes and abbreviates too early)
 - optional: eza / bat / highlight (nicer previews), wl-copy / xclip (clipboard)
 
+## Layout
+
+```
+scripts/            frecency, frecency-test, bmark.sh  -> ~/.config/vifm/scripts/
+frecency.vifm       vifm integration                   -> ~/.config/vifm/frecency.vifm
+shell/frecency.fish fish integration                   -> ~/.config/fish/frecency.fish
+shell/frecency.bash bash integration                    -> ~/.config/frecency/frecency.bash
+nvim/frecency.lua   neovim integration                  -> ~/.config/nvim/frecency/frecency.lua
+bundled/            static sqlite3 binaries            -> flattened into vifm scripts/
+```
+
 ## Install
 
 ```bash
-git clone https://github.com/<you>/frecency.git
+git clone <repo-url> frecency
 cd frecency
-./install.sh            # installs into ~/.config/vifm/scripts/
-./install.sh --dry-run  # preview
-./install.sh --uninstall
+./install.sh                 # interactive menu on a TTY; plain install otherwise
+./install.sh --register      # install and register everything
+./install.sh --no-register   # install files only
+./install.sh --dry-run       # preview every action
+./install.sh --vifm-dir DIR  # custom vifm directory (default: $XDG_CONFIG_HOME/vifm)
+./install.sh --unregister    # show and remove registered source lines
+./install.sh --uninstall     # remove installed files
 ```
 
-The installer never touches your `vifmrc`. Copy the printed snippet into
-`~/.config/vifm/vifmrc`:
+Run without arguments on a terminal, the installer shows a menu:
+
+```
+frecency installer
+==================
+  vifm dir: ~/.config/vifm
+
+  1) Install and register everything (recommended)
+  2) Install files only (skip registration)
+  3) Unregister (remove source lines)
+  4) Uninstall (remove installed files)
+  5) Dry-run: preview install + register
+  q) Quit
+Choice [1]:
+```
+
+The vifm scripts (`frecency`, `bmark.sh`) must be on `PATH`. The installer
+registers a marked `source` line in `vifmrc`:
 
 ```vim
-" --- frecency: commands (silent, async, non-blocking) ---
-command! trackPath !frecency file add "%d" %a >/dev/null 2>&1 &
-command! trackFile
-    \ ! [ ! -d "%d/%f" ] && frecency file add "%d/%f" %a >/dev/null 2>&1 &
-command! removeRecord
-    \ !frecency file remove "%d/%f" >/dev/null 2>&1 &
-command! Bmark : execute '!bmark.sh %d/%f %a &'
-
-" record every directory you enter
-autocmd DirEnter *,.* trackPath
-
-" record on open / remove record on delete / bookmark with keyword
-nnoremap <silent> l    :trackFile<cr>l
-nnoremap <silent> <cr> :trackFile<cr><cr>
-nnoremap <silent> dd   :removeRecord<cr>dd
-nnoremap          M    :Bmark<space>
-
-" o = jump from history (EMS + match grade), O = browse current tree
-source ~/.config/vifm/scripts/frecency.vifm
+" #frecency for vifm
+source ~/.config/vifm/frecency.vifm
 ```
+
+The rest of the integration lives in `frecency.vifm`. Registration is
+idempotent: if `#frecency for vifm` already exists, the installer leaves the
+file untouched and tells you to compare it manually — or delete the old block
+and run `--register` again. `--unregister` prints the exact lines it will
+remove before changing anything.
+
+Fish, bash and Neovim integrations are installed and registered automatically
+when the corresponding shell or `init.lua` is detected, using the same marker
+mechanism (a marked `source` line for the shells, a marked `dofile()` for
+Neovim). Before registering vifm, the installer also scans `vifmrc` for
+existing mappings of the keys `frecency.vifm` redefines and prints a
+non-blocking warning for each conflict.
 
 > **Why not a vifm plugin?** vifm's `plugins/` directory only loads Lua
 > plugins (`plugins/<name>/init.lua`); a `.vifm` script there is never sourced
-> and shows up as `[failed]` in `:plugins`. The whole integration is two
-> recording hooks and two mappings — a `:source`d file next to the script is
-> the thinnest possible glue, and matches the approach vifm's author
-> recommends for zoxide integration (Q2A #949).
+> and shows up as `[failed]` in `:plugins`. A `:source`d file is the thinnest
+> possible glue and matches the approach vifm's author recommends for zoxide
+> integration (Q2A #949).
 
 ## Keys
 
-In vifm:
+In vifm (defined in `frecency.vifm`):
 
 | key | action |
 |---|---|
+| `l` / `<CR>` | open and record the file |
+| `dd` | delete the file and remove its record |
+| `M` | bookmark the current entry with a keyword |
 | `o` | jump from history: type words to jump to the best match directly, empty input opens fzf |
 | `O` | browse the current directory tree with fzf (`--walker`), complements `o`'s global history |
-| `M` | bookmark current entry with a keyword |
 
 Inside the frecency fzf UI:
 
@@ -107,41 +135,55 @@ Inside the frecency fzf UI:
 | `C` | run cleanup now |
 | `Enter` | jump |
 
-## Shell integration (fish)
+### Key conflicts
 
-```fish
-# z-like jump: words jump straight to the best match, empty opens fzf
-function j --description "z-like jump from frecency history"
-    set -l cmd (frecency file jump-handler "$argv")
-    if test -n "$cmd"
-        eval $cmd
-    end
-end
+`l`, `<CR>`, `dd`, `o`, `O`, `M` are common keys. Because `frecency.vifm` is
+sourced last, its mappings override any earlier definition in `vifmrc`. The
+installer scans `vifmrc` at registration time and warns about conflicting
+user mappings (it cannot see vifm defaults, other sourced files or runtime
+`:map` commands). If you already use one of these keys:
 
-# record PWD changes
-function __frecency_pwd_handler --on-variable PWD
-    if not string match -qr "^(/tmp/|/run/|/sys/|/proc/)" "$PWD"
-        nohup frecency file add "$PWD" >/dev/null 2>&1 & disown
-    end
-end
+1. edit the corresponding `nnoremap` in `frecency.vifm` to a key you prefer, or
+2. delete the mapping line and call the commands directly instead:
+   `:trackFile`, `:removeRecord`, `:Bmark`, `:frecency file query`.
 
-# Alt-T / Alt-J: pick a path from history, insert at cursor and copy it
-function __frecency_pick
-    set -l sel (frecency file query | string trim)
-    if test -n "$sel"
-        commandline -i -- $sel
-        if command -q wl-copy
-            printf %s "$sel" | wl-copy
-        else if command -q xclip
-            printf %s "$sel" | xclip -selection clipboard
-        end
-    end
-end
-bind \et __frecency_pick
-bind \ej __frecency_pick
-```
+## Shell integration
+
+Both integrations are installed by `install.sh` and provide:
+
+- `j` — z-like jump: a directory is `cd`'d into, a file opens its parent
+  directory and copies the path to the clipboard
+- automatic recording of every directory change in the `file` topic
+- fish only: `Alt-T` inserts a history path at the command line and copies it
 
 Directories and files share one database (topic `file`), so `j` works for both.
+
+Load manually if needed:
+
+```fish
+source ~/.config/fish/frecency.fish
+```
+
+```bash
+source ~/.config/frecency/frecency.bash
+```
+
+## Neovim integration
+
+`nvim/frecency.lua` is installed to `~/.config/nvim/frecency/frecency.lua` and
+registered in `init.lua` with a marked `dofile()` line:
+
+```lua
+-- #frecency for nvim
+dofile("/home/youruser/.config/nvim/frecency/frecency.lua")
+```
+
+It records opened files into the shared `file` topic. vifm already records a
+file when `l`/`<CR>` opens it, so before adding an entry the integration asks
+the database whether anything changed in the last 5 seconds
+(`frecency file recent 5`) and skips the record in that case, preventing the
+same navigation from being counted twice. New files (`BufNewFile`) are always
+recorded since vifm cannot have seen them.
 
 ## Configuration
 
@@ -174,6 +216,7 @@ frecency <topic> query [term]               # open the fzf UI
 frecency <topic> jump-handler [term]        # best match / fzf picker -> cd command
 frecency <topic> jump-handler-vifm [term]   # same, vifm flavour (goto)
 frecency <topic> remove <content>           # delete (undoable in the UI)
+frecency <topic> recent <seconds>           # exit 0 if anything changed recently
 frecency <topic> cleanup                    # prune by MAX_ENTRIES / MAX_DAYS
 ```
 

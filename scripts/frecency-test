@@ -1,0 +1,360 @@
+#!/bin/bash
+# ============================================================================
+# frecency-test - deployment self-check for frecency (sqlite3 compatibility probe)
+# ============================================================================
+# Background:
+#   frecency resolves sqlite3 in this order: a static binary in the same directory,
+#   then the system sqlite3. On a new server the static binary may fail to run
+#   (old glibc / wrong architecture), while the system sqlite3 may be too old
+#   (no exp() math functions / no UPSERT), causing silent failures (vifmrc runs
+#   commands with >/dev/null 2>&1 &, so errors are invisible).
+#
+# What this script does:
+#   1. Probe the sqlite3 this machine will actually use: bundled (native arch)
+#      first, then the system version;
+#   2. Probe features with real SQL statements (not just version numbers);
+#   3. If bundled is incompatible, delete that file -> frecency falls back to
+#      the system sqlite3;
+#   4. If the system sqlite3 is also incompatible, fail loudly instead of
+#      failing silently.
+#
+# Checks are split into two levels (important):
+#   critical : decides compatibility. Failure -> delete bundled / mark unusable
+#   advisory : informational. Failure -> warn only, never affects deletion
+#        Example: "special-character round-trip" is a known limitation of the
+#        frecency script itself; switching sqlite3 does not help, so counting it
+#        would delete every bundled binary on every machine.
+#
+# Usage:
+#   frecency-test                 probe and delete incompatible bundled binaries
+#   frecency-test -n|--dry-run    report only, do not delete
+#   frecency-test -v|--verbose    print raw output of failing checks
+#   frecency-test -a|--all        also probe bundled binaries for other architectures
+#   frecency-test -q|--quiet      no report (still writes cache and returns status)
+#   frecency-test -h|--help
+#
+# Side effect: writes the selected sqlite3 absolute path to
+#         ~/.local/share/frecency/.sqlite3.bin
+#         frecency reads this cache on startup instead of probing on every call.
+#         Running this once during deployment selects and caches the binary.
+#
+# Exit code:
+#   0  a usable sqlite3 exists (possibly downgraded to the system version)
+#   1  no usable sqlite3, frecency cannot work
+#   2  a bundled binary should be deleted but dry-run was requested
+#
+# Suggested deployment check: frecency-test -q || echo "frecency dependencies missing" >&2
+# ============================================================================
+
+set -u
+
+SELF=$(readlink -f "$0")
+SCRIPT_DIR=$(dirname "$SELF")
+FRECENCY="$SCRIPT_DIR/frecency"
+
+DRY_RUN=0
+VERBOSE=0
+PROBE_ALL=0
+QUIET=0
+DATA_DIR="${HOME:-/tmp}/.local/share/frecency"
+CACHE="$DATA_DIR/.sqlite3.bin"
+
+# --- Minimum versions (informational; feature probes are authoritative) ---
+#   3.35.0  exp() and other math functions (requires SQLITE_ENABLE_MATH_FUNCTIONS)  <- hard floor
+#           frecency has no approximate fallback without exp(); missing means unusable
+#   3.24.0  UPSERT (INSERT ... ON CONFLICT DO UPDATE)
+#   3.8.0   partial indexes CREATE INDEX ... WHERE ...
+#   3.7.0   WAL
+MIN_VER="3.35.0"
+
+# --- Colors (disabled when not a tty, suitable for vifm system() calls) ---
+if [[ -t 1 ]]; then
+    C_0=$'\e[0m'; C_B=$'\e[1m'; C_G=$'\e[32m'; C_Y=$'\e[33m'; C_R=$'\e[31m'; C_C=$'\e[36m'; C_D=$'\e[2m'
+else
+    C_0=""; C_B=""; C_G=""; C_Y=""; C_R=""; C_C=""; C_D=""
+fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n|--dry-run) DRY_RUN=1; shift ;;
+        -v|--verbose) VERBOSE=1; shift ;;
+        -a|--all)     PROBE_ALL=1; shift ;;
+        -q|--quiet)   QUIET=1; shift ;;
+        -h|--help)    sed -n '2,46p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "Unknown option: $1 (try --help)" >&2; exit 1 ;;
+    esac
+done
+
+# Quiet mode suppresses stdout only; stderr (real errors) still goes through
+[[ $QUIET -eq 1 ]] && exec >/dev/null
+
+TMPD=$(mktemp -d "${TMPDIR:-/tmp}/frecency-test.XXXXXX")
+trap 'rm -rf "$TMPD"' EXIT
+
+# --- Architecture detection: must match frecency ---
+detect_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64)  echo "x86_64" ;;
+        aarch64|arm64) echo "arm64"  ;;
+        *)             echo ""       ;;
+    esac
+}
+ARCH=$(detect_arch)
+
+ver2num() { awk -F. '{printf "%d", ($1*1000000)+($2*1000)+$3}' <<< "${1}"; }
+
+declare -a FAILED_CRIT=()
+declare -a FAILED_ADV=()
+declare -a ADV_DETAIL=()
+PROBE_VER=""
+
+# Execute SQL (through stdin, so heredoc shell expansion cannot interfere)
+# Usage: run_sql <bin> <db> <sql> -> returns 0 on success and sets OUT / ERR
+OUT=""; ERR=""
+run_sql() {
+    local bin="$1" db="$2" sql="$3"
+    local errf="$TMPD/.err"
+    OUT=$(printf '%s\n' "$sql" | "$bin" -batch -list -init /dev/null "$db" 2>"$errf")
+    local rc=$?
+    ERR=$(tr -d '\r' < "$errf")
+    [[ $rc -eq 0 && -z "$ERR" ]]
+}
+
+# ============================================================================
+# Probe a single binary
+# ============================================================================
+probe_bin() {
+    local bin="$1"
+    local db="$TMPD/probe_$(basename "$bin" | tr -c 'A-Za-z0-9' '_').db"
+    rm -f "$db" "$db-wal" "$db-shm"
+
+    FAILED_CRIT=(); FAILED_ADV=(); ADV_DETAIL=(); PROBE_VER=""
+    local ver out
+
+    # --- 0. Executable? ---
+    if [[ ! -x "$bin" ]]; then
+        FAILED_CRIT+=("not executable (missing +x or file does not exist)")
+        return 1
+    fi
+    ver=$("$bin" --version 2>/dev/null | awk '{print $1}')
+    if [[ -z "$ver" ]]; then
+        FAILED_CRIT+=("cannot start (typically old glibc or architecture mismatch)")
+        ADV_DETAIL+=("$("$bin" --version 2>&1 | head -n 2 | tr '\n' '|')")
+        return 1
+    fi
+    PROBE_VER="$ver"
+
+    # --- 1. Minimum version (critical, fast pre-filter) ---
+    if [[ $(ver2num "$ver") -lt $(ver2num "$MIN_VER") ]]; then
+        FAILED_CRIT+=("version $ver < $MIN_VER (missing exp() math functions and other features)")
+        return 1
+    fi
+
+    # --- 2. WAL ---
+    if out=$("$bin" -batch -init /dev/null "$db" "PRAGMA journal_mode=WAL;" 2>&1) && [[ "$out" == "wal" ]]; then
+        :
+    else
+        FAILED_CRIT+=("WAL unavailable (returned: ${out:-empty})")
+        ADV_DETAIL+=("$out")
+    fi
+
+    # --- 3. Create table + partial index ---
+    run_sql "$bin" "$db" "
+        CREATE TABLE IF NOT EXISTS entries (
+            content TEXT PRIMARY KEY,
+            keyword TEXT DEFAULT '',
+            score INTEGER DEFAULT 1,
+            last_access DATETIME DEFAULT CURRENT_TIMESTAMP);
+        CREATE INDEX IF NOT EXISTS ix1 ON entries (score DESC, last_access DESC);
+        CREATE INDEX IF NOT EXISTS ix2 ON entries (keyword) WHERE keyword != '';" \
+        || { FAILED_CRIT+=("CREATE TABLE / partial index failed"); ADV_DETAIL+=("$ERR"); }
+
+    # --- 4. UPSERT (the core statement of frecency's do_add) ---
+    run_sql "$bin" "$db" "
+        INSERT INTO entries (content, keyword, score) VALUES ('/a', 'kw', 1)
+        ON CONFLICT(content) DO UPDATE SET
+            keyword = CASE WHEN 'kw' != '' THEN 'kw' ELSE keyword END,
+            score   = CASE WHEN 'kw' != '' THEN MAX(score, 9999) + 1 ELSE score + 1 END,
+            last_access = CURRENT_TIMESTAMP;" \
+        || { FAILED_CRIT+=("UPSERT (ON CONFLICT DO UPDATE) is not supported"); ADV_DETAIL+=("$ERR"); }
+
+    # --- 5. Functions used by the display layer (printf / char / strftime localtime / LIKE concatenation) ---
+    run_sql "$bin" "$db" "
+        SELECT printf('%-12d', score) || char(27) || '[33m' || keyword || char(27) || '[0m'
+               || strftime('%Y-%m-%d %H:%M:%S', last_access, 'localtime')
+        FROM entries
+        WHERE content LIKE '%' || 'a' || '%' OR keyword LIKE '%' || 'a' || '%';" \
+        || { FAILED_CRIT+=("printf/char/strftime/LIKE failed"); ADV_DETAIL+=("$ERR"); }
+
+    # --- 6. Special-character round-trip (critical) ---
+    #     frecency now passes values with single-quoted literals + '' escaping;
+    #     this is the only parameter mechanism it depends on. Verify that a path
+    #     containing double quotes / backslashes / single quotes / backticks /
+    #     non-ASCII text round-trips exactly.
+    local -a tricky_vals=(
+        '/opt/we"ird\back\slash 文件.pdf'
+        "/opt/it's a file.md"
+        '/opt/a$b`c.pdf'
+    )
+    local v esc bad=0
+    for v in "${tricky_vals[@]}"; do
+        esc=${v//\'/\'\'}
+        out=$("$bin" -batch -list -init /dev/null "$db" \
+              "INSERT OR REPLACE INTO entries(content) VALUES('$esc');
+               SELECT content FROM entries WHERE content='$esc';" 2>&1)
+        if [[ "$out" != "$v" ]]; then
+            bad=1
+            ADV_DETAIL+=("round-trip failed: expected [$v] got [$out]")
+        fi
+    done
+    [[ $bad -eq 0 ]] || FAILED_CRIT+=("special-character path round-trip failed (single-quote literal escaping)")
+
+    # --- 7. exp() math function (critical: EMS decay hard-depends on it, no fallback) ---
+    out=$("$bin" -batch -list -init /dev/null "$db" "SELECT printf('%.4f', exp(1));" 2>&1)
+    [[ "$out" == "2.7183" ]] || {
+        FAILED_CRIT+=("exp() unavailable (requires SQLite >= 3.35 with SQLITE_ENABLE_MATH_FUNCTIONS)")
+        ADV_DETAIL+=("$out")
+    }
+
+    # --- 8. LIMIT -1 OFFSET n (used by do_cleanup) ---
+    run_sql "$bin" "$db" \
+        "SELECT content FROM entries ORDER BY score DESC LIMIT -1 OFFSET 1;" \
+        || { FAILED_CRIT+=("LIMIT -1 OFFSET n is not supported"); ADV_DETAIL+=("$ERR"); }
+
+    [[ ${#FAILED_CRIT[@]} -eq 0 ]]
+}
+
+report_bin() {
+    local bin="$1"; local label="$2"
+    printf '%s%s%s %s(%s)%s\n' "$C_B" "$label" "$C_0" "$C_D" "$bin" "$C_0"
+    [[ -n "$PROBE_VER" ]] && printf '  version   %s\n' "$PROBE_VER"
+    if [[ ${#FAILED_CRIT[@]} -gt 0 ]]; then
+        for f in "${FAILED_CRIT[@]}"; do printf '  %s✗ [critical]%s %s\n' "$C_R" "$C_0" "$f"; done
+        printf '  %s✗ incompatible%s\n' "$C_R" "$C_0"
+    elif [[ ${#FAILED_ADV[@]} -gt 0 ]]; then
+        printf '  %s✓ all critical checks passed (with advisory notices)%s\n' "$C_G" "$C_0"
+    else
+        printf '  %s✓ all checks passed%s\n' "$C_G" "$C_0"
+    fi
+    if [[ ${#FAILED_ADV[@]} -gt 0 ]]; then
+        for f in "${FAILED_ADV[@]}"; do printf '  %s! [advisory]%s %s\n' "$C_Y" "$C_0" "$f"; done
+    fi
+    if [[ $VERBOSE -eq 1 && ${#ADV_DETAIL[@]} -gt 0 ]]; then
+        for d in "${ADV_DETAIL[@]}"; do printf '%s      raw: %s%s\n' "$C_D" "$d" "$C_0"; done
+    fi
+    echo
+}
+
+# ============================================================================
+# Main flow
+# ============================================================================
+NEED_DELETE=0
+echo
+printf '%sfrecency sqlite3 compatibility self-check%s\n' "$C_B" "$C_0"
+printf '%shost arch: %s   script dir: %s   minimum version: %s%s\n' "$C_D" "$(uname -m)" "$SCRIPT_DIR" "$MIN_VER" "$C_0"
+[[ -x "$FRECENCY" ]] || printf '%s! frecency not executable or not found: %s%s\n' "$C_Y" "$FRECENCY" "$C_0"
+echo
+
+BUNDLED=""
+if [[ -n "$ARCH" ]]; then
+    # Repo layout is bundled/sqlite3-<arch>; the installer flattens it to
+    # sqlite3-<arch> inside the vifm scripts directory.
+    BUNDLED="$SCRIPT_DIR/sqlite3-$ARCH"
+    [[ -e "$BUNDLED" ]] || BUNDLED="$SCRIPT_DIR/../bundled/sqlite3-$ARCH"
+fi
+
+# --- 1. Probe bundled ---
+BUNDLED_OK=1
+if [[ -n "$BUNDLED" && -e "$BUNDLED" ]]; then
+    probe_bin "$BUNDLED"; BUNDLED_OK=$?
+    report_bin "$BUNDLED" "bundled static binary"
+
+    if [[ $BUNDLED_OK -ne 0 ]]; then
+        if [[ $DRY_RUN -eq 1 ]]; then
+            printf '%s[dry-run]%s would delete incompatible binary: %s\n\n' "$C_Y" "$C_0" "$BUNDLED"
+            NEED_DELETE=1
+        elif rm -f "$BUNDLED"; then
+            printf '%sdeleted%s incompatible binary: %s\n' "$C_Y" "$C_0" "$BUNDLED"
+            printf '%s        -> frecency will fall back to the system sqlite3%s\n\n' "$C_D" "$C_0"
+        else
+            printf '%sdelete failed%s (no write permission?): %s\n\n' "$C_R" "$C_0" "$BUNDLED"
+        fi
+    fi
+elif [[ -n "$ARCH" ]]; then
+    printf '%sbundled static binary not found (%s); using system sqlite3%s\n\n' "$C_D" "$BUNDLED" "$C_0"
+else
+    printf '%s! unknown architecture %s; the bundled binary will not be used%s\n\n' "$C_Y" "$(uname -m)" "$C_0"
+fi
+
+# --- 2. Probe system sqlite3 ---
+SYS_BIN=""; SYS_OK=1
+if command -v sqlite3 >/dev/null 2>&1; then
+    SYS_BIN=$(command -v sqlite3)
+    probe_bin "$SYS_BIN"; SYS_OK=$?
+    report_bin "$SYS_BIN" "system sqlite3"
+else
+    printf '%s✗ sqlite3 not found in PATH%s\n\n' "$C_R" "$C_0"
+fi
+
+# --- 3. Also probe bundled binaries for other architectures (read-only, never deleted) ---
+if [[ $PROBE_ALL -eq 1 ]]; then
+    for f in "$SCRIPT_DIR"/sqlite3-* "$SCRIPT_DIR"/bundled/sqlite3-*; do
+        [[ -e "$f" ]] || continue
+        [[ -n "$BUNDLED" && "$f" == "$BUNDLED" ]] && continue
+        printf '%s-- additional probe (other architecture, read-only, never deleted): %s%s\n' "$C_D" "$(basename "$f")" "$C_0"
+        probe_bin "$f"
+        report_bin "$f" "$(basename "$f")"
+    done
+fi
+
+# ============================================================================
+# Environment notice: awk UTF-8 awareness (advisory; does not affect exit code
+# or the deletion decision)
+# ============================================================================
+# frecency abbreviates list paths by display width: ASCII counts 1, non-ASCII
+# counts 2. Under a UTF-8 locale gawk splits by character (one CJK character -> 1);
+# mawk splits by byte (one CJK character -> 3 bytes), counting CJK as 3 bytes x 2 = 6 columns
+# and abbreviating the list too early (degraded display, not broken functionality).
+# If awk points to mawk on this machine, installing gawk is recommended.
+AWK_BIN=$(command -v awk 2>/dev/null)
+if [[ -n "$AWK_BIN" ]] && ! LC_ALL=en_US.UTF-8 awk 'BEGIN { exit !(split("中", a, "") == 1) }' 2>/dev/null; then
+    printf '%s! [advisory]%s awk is not UTF-8 aware (mawk?): %s\n' "$C_Y" "$C_0" "$AWK_BIN"
+    printf '         CJK path widths are counted in bytes (3x); the list abbreviates early. Recommended: install gawk\n\n'
+fi
+
+# ============================================================================
+# Conclusion
+# ============================================================================
+printf '%sConclusion%s\n' "$C_B" "$C_0"
+FINAL=0
+EFFECTIVE=""
+# Priority must match frecency's _resolve_sqlite3:
+#   system version (when the probe passes) first -- 10x faster startup in testing;
+#   bundled is only a fallback.
+if [[ $SYS_OK -eq 0 ]]; then
+    printf '  effective: %ssystem sqlite3%s  %s\n' "$C_G" "$C_0" "$SYS_BIN"
+    EFFECTIVE="$SYS_BIN"
+elif [[ -n "$BUNDLED" && $BUNDLED_OK -eq 0 && -x "$BUNDLED" ]]; then
+    printf '  effective: %sbundled%s  %s\n' "$C_G" "$C_0" "$BUNDLED"
+    printf '  %s(system sqlite3 unavailable or inadequate; using bundled fallback)%s\n' "$C_D" "$C_0"
+    EFFECTIVE="$BUNDLED"
+else
+    printf '  %s✗ no usable sqlite3; frecency cannot work%s\n' "$C_R" "$C_0"
+    printf '    Recommended: install sqlite3 >= %s, or provide a working static binary at %s\n' \
+        "$MIN_VER" "${BUNDLED:-$SCRIPT_DIR/sqlite3-<arch>}"
+    FINAL=1
+fi
+
+# Write the selection cache: frecency reads it at startup to avoid probing every call
+if [[ -n "$EFFECTIVE" ]]; then
+    mkdir -p "$DATA_DIR" 2>/dev/null
+    if printf '%s' "$EFFECTIVE" > "$CACHE" 2>/dev/null; then
+        printf '  %scache written: %s%s\n' "$C_D" "$CACHE" "$C_0"
+    else
+        printf '  %s! cannot write cache (still usable, but each call probes again): %s%s\n' "$C_Y" "$CACHE" "$C_0"
+    fi
+fi
+
+[[ $NEED_DELETE -eq 1 ]] && FINAL=2
+echo
+exit $FINAL
