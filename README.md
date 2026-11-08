@@ -16,9 +16,18 @@ a tmux popup, and is equally usable as a standalone CLI.
 | Tracks | directories only | **any topic** (dirs, files, shell commands, ...) |
 | Ranking | frecency score + global aging | event clock + EMS exponential decay |
 | Matching | substring | ordered / any-order **multi-word** + match-quality grading |
+| Bookmarks | none | **arbitrary keyword tags** — `M <tag>` records, `o <tag>` jumps directly (grade 0, zero interaction), unbook keeps the history |
 | UI | terminal prompt (fzf picker via `zi`) | modal fzf (NORMAL/SEARCH, Vim keys) with live preview |
 | Curation | `zoxide delete` / `remove` | delete with undo, keyword bookmarks, keep-history unbookmark |
 | Preview | via `ZO_FZF_OPTS` customization | built-in: dirs / text / binary / command, 4-way branch |
+
+Keyword bookmarks are the biggest day-to-day difference: a bookmark is an
+**arbitrary word** stored with the entry's full usage history — not one of 52
+single letters. Because a keyword hit is grade 0, `o <tag>` lands on it in
+one step with no interaction, which makes it an effective replacement for
+vifm's `marks` (in vifm, `M` also syncs the vifm bookmark via
+`vifm --remote`, so marks-based navigation keeps working). Dropping the tag
+never throws away the data.
 
 The scoring model was inspired by [ze](https://github.com/jghub/ze) and the
 design was iterated in [fzf#4789](https://github.com/junegunn/fzf/issues/4789).
