@@ -172,7 +172,8 @@ Both integrations are installed by `install.sh` and provide:
 - `j` — z-like jump: a directory is `cd`'d into, a file opens its parent
   directory and copies the path to the clipboard
 - automatic recording of every directory change in the `file` topic
-- fish only: `Alt-T` inserts a history path at the command line and copies it
+- `Alt-T` inserts a history path at the command line and copies it
+  (fish and bash; in bash it overrides the default `M-t` transpose-words)
 
 Directories and files share one database (topic `file`), so `j` works for both.
 They only need `frecency` on `PATH` — the `~/.local/bin` symlink created by
