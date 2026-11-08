@@ -1038,7 +1038,9 @@ do_jump_handler() {
     if [[ -d "$raw_path" ]]; then
         printf "cd '%s'\n" "$(shq "$raw_path")"
     elif [[ -f "$raw_path" ]]; then
-        _do_internal_op "refresh" "$raw_path"
+        # Selection itself is not a visit (no score bump here): navigating to
+        # a file only positions on it. A visit is counted when the file is
+        # actually opened (vifm l/<CR> trackFile, Neovim BufRead, ...).
         if [[ "$ACTION" == *"vifm" ]]; then
             printf "goto '%s'\n" "$(shq "$raw_path")"
         else
