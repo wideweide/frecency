@@ -495,6 +495,13 @@ fi
 if [[ $DRY_RUN -eq 0 ]]; then
     printf '\nRunning self-check...\n'
     "$TARGET/frecency-test" || printf 'self-check reported issues (see above)\n'
+    # Initialize the shared `file` database now so the first vifm DirEnter
+    # does not have to create it, and so exp() availability is verified with
+    # the sqlite3 chosen by the self-check. Failure is non-fatal: the topic
+    # is initialized lazily on first use anyway.
+    printf '\nInitializing the `file` database...\n'
+    "$TARGET/frecency" file init \
+        || printf 'warning: initialization failed; it will be retried on first use\n'
 fi
 
 if [[ $BIN_LINK -eq 1 ]]; then
