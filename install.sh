@@ -6,7 +6,8 @@
 #   scripts/frecency, scripts/frecency-test, scripts/bmark.sh
 #                                         -> ${XDG_CONFIG_HOME:-~/.config}/vifm/scripts/
 #   frecency.vifm                         -> ${XDG_CONFIG_HOME:-~/.config}/vifm/frecency.vifm
-#   bundled/sqlite3-<native arch>         -> vifm scripts/ (flattened, native arch only)
+#   bundled/sqlite3-<native arch>         -> vifm scripts/ (only when the system
+#                                            sqlite3 does not already qualify)
 #   shell/frecency.fish                   -> fish config dir (when fish is installed)
 #   shell/frecency.bash                   -> ${XDG_CONFIG_HOME:-~/.config}/frecency/
 #   nvim/frecency.lua                     -> nvim config dir (when init.lua exists)
@@ -25,7 +26,7 @@
 #   ./install.sh --register          install and register everything
 #   ./install.sh --no-register       install files only, skip all registration
 #   ./install.sh --unregister        show and remove registered source lines
-#   ./install.sh --uninstall         remove installed files
+#   ./install.sh --uninstall         remove registration lines and installed files
 #   ./install.sh --vifm-dir DIR      use DIR instead of ~/.config/vifm
 #   ./install.sh --bin-link          create the ~/.local/bin symlink (default
 #                                     with --register; skipped otherwise)
@@ -312,9 +313,15 @@ if [[ $UNREGISTER -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Uninstall installed files
+# Uninstall: remove the registration lines first (a reference to a removed
+# file would only error at startup), then the installed files themselves
 # ---------------------------------------------------------------------------
 if [[ $UNINSTALL -eq 1 ]]; then
+    unregister_source "$VIFMRC"      '" #frecency for vifm'  'frecency.vifm' "frecency vifm"
+    unregister_source "$FISH_CONFIG" '#frecency for fish'    'frecency.fish' "frecency fish"
+    unregister_source "$BASH_RC"     '#frecency for bash'    'frecency.bash' "frecency bash"
+    unregister_source "$NVIM_INIT"   '-- #frecency for nvim' 'frecency.lua'  "frecency nvim"
+
     removed=()
     for f in "${SCRIPTS[@]}" "${BUNDLED_ALL[@]}"; do
         if [[ -e "$VIFM_DIR/scripts/$f" ]]; then
@@ -340,8 +347,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
             run rmdir --ignore-fail-on-non-empty "$d" || true
         fi
     done
-    [[ $DRY_RUN -eq 0 ]] && printf 'Removed %d file(s).\n' "${#removed[@]}"
-    printf 'Registration lines were left in place; run --unregister to remove them.\n'
+    [[ $DRY_RUN -eq 0 ]] && printf 'Removed %d file(s) and cleaned up registration lines.\n' "${#removed[@]}"
     exit 0
 fi
 
@@ -350,6 +356,20 @@ fi
 # ---------------------------------------------------------------------------
 [[ -x "$SRC_DIR/scripts/frecency" ]] || {
     printf 'frecency not found in %s/scripts\n' "$SRC_DIR" >&2; exit 1
+}
+
+# Does the system sqlite3 satisfy frecency's requirements: >= 3.35.0 built
+# with exp()? Same checks as frecency's own resolver (version + real exp()
+# probe, not just the version number).
+_install_ver_num() { awk -F. '{printf "%d", ($1*1000000)+($2*1000)+$3}' <<< "$1"; }
+
+system_sqlite_ok() {
+    command -v sqlite3 >/dev/null 2>&1 || return 1
+    local v
+    v=$(sqlite3 --version 2>/dev/null | awk '{print $1}') || return 1
+    [[ -n "$v" ]] || return 1
+    (( $(_install_ver_num "$v") >= 3035000 )) || return 1
+    [[ "$(sqlite3 :memory: "SELECT printf('%.4f', exp(1));" 2>/dev/null)" == "2.7183" ]]
 }
 
 TARGET="$VIFM_DIR/scripts"
@@ -361,17 +381,28 @@ for f in "${SCRIPTS[@]}"; do
 done
 run install -m 644 "$SRC_DIR/frecency.vifm" "$VIFM_DIR/frecency.vifm"
 installed+=("$VIFM_DIR/frecency.vifm")
-# Only the native-architecture binary is installed; the other one in the repo
-# stays behind (about 1-2 MB each). An older install may still hold both.
+# The bundled static binary is only installed when the system sqlite3 does
+# not already satisfy the requirements; it is a fallback for machines without
+# a usable system sqlite3. Only the native-architecture binary is installed,
+# and stale binaries from older installs are pruned. When the choice was left
+# to frecency-test below, its self-check rewrites the selection cache.
+BUNDLED_KEEP=""
 if [[ -n "$ARCH" ]]; then
-    if [[ -e "$SRC_DIR/bundled/sqlite3-$ARCH" ]]; then
+    if system_sqlite_ok; then
+        printf 'System sqlite3 (%s) meets the requirements; skipping the bundled static binary.\n' \
+            "$(sqlite3 --version 2>/dev/null | awk '{print $1}')"
+    elif [[ -e "$SRC_DIR/bundled/sqlite3-$ARCH" ]]; then
+        printf 'System sqlite3 does not qualify; installing the bundled static binary (%s).\n' "$ARCH"
         run install -m 755 "$SRC_DIR/bundled/sqlite3-$ARCH" "$TARGET/sqlite3-$ARCH"
         installed+=("$TARGET/sqlite3-$ARCH")
+        BUNDLED_KEEP="sqlite3-$ARCH"
+    else
+        printf 'No usable system sqlite3 and no bundled binary for %s; install sqlite3 >= 3.35.\n' "$(uname -m)"
     fi
     for f in "${BUNDLED_ALL[@]}"; do
-        [[ "$f" == "sqlite3-$ARCH" ]] && continue
+        [[ "$f" == "$BUNDLED_KEEP" ]] && continue
         if [[ -e "$TARGET/$f" ]]; then
-            printf 'Removing stale binary from an older install: %s\n' "$TARGET/$f"
+            printf 'Removing stale bundled binary: %s\n' "$TARGET/$f"
             run rm -f "$TARGET/$f"
         fi
     done
@@ -387,6 +418,7 @@ fi
 # Shell integration (only when the shell is installed)
 # ---------------------------------------------------------------------------
 if [[ -f "$SRC_DIR/shell/frecency.fish" ]] && command -v fish >/dev/null 2>&1; then
+    run mkdir -p "$FISH_DIR"
     run install -m 644 "$SRC_DIR/shell/frecency.fish" "$FISH_FILE"
     if [[ $REG_FISH -eq 1 ]]; then
         register_source "$FISH_CONFIG" '#frecency for fish' "source ${FISH_FILE}" "frecency fish"

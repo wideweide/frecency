@@ -48,7 +48,7 @@ frecency.vifm       vifm integration                   -> ~/.config/vifm/frecenc
 shell/frecency.fish fish integration                   -> ~/.config/fish/frecency.fish
 shell/frecency.bash bash integration                    -> ~/.config/frecency/frecency.bash
 nvim/frecency.lua   neovim integration                  -> ~/.config/nvim/frecency/frecency.lua
-bundled/            static sqlite3 binaries            -> native-arch binary into vifm scripts/
+bundled/            static sqlite3 binaries            -> native-arch binary into vifm scripts/ (when needed)
 scripts/frecency    symlink                             -> ~/.local/bin/frecency (opt-in)
 ```
 
@@ -64,7 +64,7 @@ cd frecency
 ./install.sh --dry-run       # preview every action
 ./install.sh --vifm-dir DIR  # custom vifm directory (default: $XDG_CONFIG_HOME/vifm)
 ./install.sh --unregister    # show and remove registered source lines
-./install.sh --uninstall     # remove installed files
+./install.sh --uninstall     # remove registration lines and installed files
 ```
 
 Run without arguments on a terminal, the installer shows a menu:
@@ -87,11 +87,12 @@ Choice [1]:
 Without a TTY (e.g. `curl ... | bash`), the installer only copies files and
 touches nothing else; every write is opt-in via `--register` / `--bin-link`.
 
-Only the native-architecture sqlite3 binary is installed. The installer can
-also create a `~/.local/bin/frecency` symlink so the script is reachable from
-any shell (bash, fish, zsh, ...) without further `PATH` setup; vifm itself
-adds its `scripts/` directory to `PATH` automatically, so `bmark.sh` needs no
-configuration.
+The bundled static sqlite3 is only installed when the system sqlite3 does not
+already qualify (>= 3.35 with `exp()`), and only for the native architecture.
+The installer can also create a `~/.local/bin/frecency` symlink so the script
+is reachable from any shell (bash, fish, zsh, ...) without further `PATH`
+setup; vifm itself adds its `scripts/` directory to `PATH` automatically, so
+`bmark.sh` needs no configuration.
 
 The installer registers a marked `source` line in `vifmrc`:
 

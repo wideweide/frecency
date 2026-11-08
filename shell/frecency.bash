@@ -27,7 +27,10 @@ __frecency_pwd_handler() {
     case "$PWD" in
         /tmp/*|/run/*|/sys/*|/proc/*) return 0 ;;
     esac
+    # disown removes the job from the job table, so bash does not print a
+    # "[1]+ Done" notification at the next prompt.
     nohup frecency file add "$PWD" >/dev/null 2>&1 &
+    disown
 }
 
 # Append after any existing PROMPT_COMMAND without replacing it.
