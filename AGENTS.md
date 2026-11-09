@@ -19,7 +19,7 @@
 - Read the affected implementation and its related documentation before editing.
 - Preserve compatibility across the supported Bash, SQLite, fzf, vifm, fish, and Neovim interfaces. Avoid changing key mappings, CLI output, schema, or install paths without updating their callers and documentation.
 - Database changes must be migration-safe and idempotent. Do not assume a user's database can be discarded.
-- Keep machine-specific paths, credentials, personal remotes, and deployment procedures out of tracked files. Do not add private instructions to `README.md` or this file.
+- Keep machine-specific paths, credentials, remote URLs, and deployment procedures out of tracked files. Do not add private instructions to `README.md` or this file.
 - When behavior, options, defaults, dependencies, installation, or integration details change, update `README.md` in the same change.
 - Make focused changes and preserve the existing shell style and quoting discipline.
 
