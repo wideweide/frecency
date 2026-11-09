@@ -4,3 +4,6 @@ nvim.log
 # Editor / system noise
 *.swp
 .DS_Store
+
+# Per-machine harness instructions and private sync configuration
+.harness-local/

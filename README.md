@@ -51,6 +51,10 @@ only ticks on real navigation events, not on wall time).
 - gawk recommended (mawk counts CJK paths in bytes and abbreviates too early)
 - optional: eza / bat / highlight (nicer previews), wl-copy / xclip (clipboard)
 
+When a `file` or `dir` entry points to a path that no longer exists, the preview
+highlights it as a missing path and explains how to remove the stale record:
+press `d` in the picker or run `frecency <topic> remove <path>`.
+
 ## Layout
 
 ```

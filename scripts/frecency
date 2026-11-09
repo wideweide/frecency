@@ -125,6 +125,7 @@ C_BOLD=$'\e[1m'
 C_GREEN=$'\e[32m'
 C_CYAN=$'\e[36m'
 C_BLUE=$'\e[34m'
+C_RED=$'\e[31m'
 C_YELLOW=$'\e[33m'
 
 # ============================================================================
@@ -656,6 +657,12 @@ do_preview() {
                 file -b "$content"; ls -ldh "$content" | awk '{print "Size: "$5"\nPerms: "$1"\nOwner: "$3}'
             fi
         fi
+    elif [[ "$TOPIC" == "file" || "$TOPIC" == "dir" ]]; then
+        printf '%s%s%s\n' "${C_RED}${C_BOLD}" "--- Missing Path ---" "$C_NORMAL"
+        printf '%sPath no longer exists:%s %s\n' "$C_RED" "$C_NORMAL" "$content"
+        printf '%sRemove this stale record with %s[d]%s in the picker, or run:%s\n' \
+            "$C_YELLOW" "$C_BOLD" "$C_YELLOW" "$C_NORMAL"
+        printf '  frecency %s remove <path>\n' "$TOPIC"
     else
         local cmd_name="${content%% *}"
         local cmd_type=$(type -t "$cmd_name" 2>/dev/null)
