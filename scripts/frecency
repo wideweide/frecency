@@ -563,13 +563,22 @@ do_recent() {
 do_preview() {
     local content="${1##*$SEP}"     # last field = the real path/command
     local db_info
+    local path_missing=0
+    if [[ "$TOPIC" == "file" || "$TOPIC" == "dir" ]] && [[ ! -e "$content" ]]; then
+        path_missing=1
+    fi
 
     # Full path: the list column is narrow and long paths get truncated; the first
     # preview line shows the whole path. FZF_PREVIEW_COLUMNS is injected by fzf and
     # fold wraps to the preview width (paths rarely contain spaces, so -s falls back
     # to a hard width cut).
     printf '%s%s%s\n' "${C_CYAN}${C_BOLD}" "--- Full Path ---" "$C_NORMAL"
-    printf '%s\n' "$content" | fold -s -w "${FZF_PREVIEW_COLUMNS:-100}"
+    if (( path_missing )); then
+        printf '\e[9m%s\e[0m\n' "$content" \
+            | fold -s -w "${FZF_PREVIEW_COLUMNS:-100}"
+    else
+        printf '%s\n' "$content" | fold -s -w "${FZF_PREVIEW_COLUMNS:-100}"
+    fi
     printf '\n'
 
     _ensure_ready || return 1
@@ -658,11 +667,11 @@ do_preview() {
             fi
         fi
     elif [[ "$TOPIC" == "file" || "$TOPIC" == "dir" ]]; then
-        printf '%s%s%s\n' "${C_RED}${C_BOLD}" "--- Missing Path ---" "$C_NORMAL"
-        printf '%sPath no longer exists:%s %s\n' "$C_RED" "$C_NORMAL" "$content"
-        printf '%sRemove this stale record with %s[d]%s in the picker, or run:%s\n' \
-            "$C_YELLOW" "$C_BOLD" "$C_YELLOW" "$C_NORMAL"
-        printf '  frecency %s remove <path>\n' "$TOPIC"
+        printf '%s%s%s\n' "${C_RED}${C_BOLD}" "!!! MISSING PATH !!!" "$C_NORMAL"
+        printf 'This entry points to a path that no longer exists.\n\n'
+        printf 'Available actions:\n'
+        printf '%s\n' '- Press d in the picker to delete this record.'
+        printf '%s\n' "- Run: frecency $TOPIC remove <path>"
     else
         local cmd_name="${content%% *}"
         local cmd_type=$(type -t "$cmd_name" 2>/dev/null)

@@ -19,7 +19,7 @@ a tmux popup, and is equally usable as a standalone CLI.
 | Bookmarks | none | **arbitrary keyword tags** — `M <tag>` records, `o <tag>` jumps directly (grade 0, zero interaction), unbook keeps the history |
 | UI | terminal prompt (fzf picker via `zi`) | modal fzf (NORMAL/SEARCH, Vim keys) with live preview |
 | Curation | `zoxide delete` / `remove` | delete with undo, keyword bookmarks, keep-history unbookmark |
-| Preview | via `ZO_FZF_OPTS` customization | built-in: dirs / text / binary / command, 4-way branch |
+| Preview | via `ZO_FZF_OPTS` customization | built-in: dirs / text / binary / command; missing paths are struck through and flagged for cleanup |
 
 Keyword bookmarks are the biggest day-to-day difference: a bookmark is an
 **arbitrary word** stored with the entry's full usage history — not one of 52
@@ -50,10 +50,6 @@ only ticks on real navigation events, not on wall time).
 - file (MIME detection for previews), flock (util-linux, migration locking)
 - gawk recommended (mawk counts CJK paths in bytes and abbreviates too early)
 - optional: eza / bat / highlight (nicer previews), wl-copy / xclip (clipboard)
-
-When a `file` or `dir` entry points to a path that no longer exists, the preview
-highlights it as a missing path and explains how to remove the stale record:
-press `d` in the picker or run `frecency <topic> remove <path>`.
 
 ## Layout
 
