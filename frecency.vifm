@@ -23,18 +23,18 @@
 
 " --- 1. Core commands (silent, asynchronous, never block the UI) ---
 
-" trackPath: record the current directory in the shared `file` topic.
+" trackPath: record the current directory in unified and directory history.
 " With an argument it is stored as a keyword; otherwise as a normal entry.
 " %d is the absolute directory path, %a is the optional keyword.
-command! trackPath !frecency file add "%d" %a >/dev/null 2>&1 &
+command! trackPath !frecency file add --route unified,dir "%d" %a >/dev/null 2>&1 &
 
 " trackFile: record a file in the `file` topic only. %a is the optional keyword.
 command! trackFile
-    \ ! [ ! -d "%d/%f" ] && frecency file add "%d/%f" %a >/dev/null 2>&1 &
+    \ ! [ ! -d "%d/%f" ] && frecency file add --route unified,file "%d/%f" %a >/dev/null 2>&1 &
 
-" Remove the current path from the shared `file` topic
+" Remove the current path from unified and matching type-specific history
 command! removeRecord
-    \ !frecency file remove "%d/%f" >/dev/null 2>&1 &
+    \ ! if [ -d "%d/%f" ]; then frecency file remove --route unified,dir "%d/%f"; else frecency file remove --route unified,file "%d/%f"; fi >/dev/null 2>&1 &
 
 " Enhanced bookmark: call the external script to update the DB and Vifm bookmarks
 command! Bmark : execute '!bmark.sh %d/%f %a &'
@@ -62,6 +62,11 @@ nnoremap M :Bmark<space>
 nnoremap <silent> o :set noquickview |
     \ let $JUMP_CMD = system('frecency file jump-handler-vifm') |
     \ if $JUMP_CMD != '' | execute $JUMP_CMD | endif <cr>
+
+" Type-specific jump commands live on the command line, preserving vifm's
+" built-in j motion. Use :j [query] for directories and :J [query] for files.
+command! j :execute system('frecency file_dir jump-handler-vifm %a')
+command! J :execute system('frecency file_file jump-handler-vifm %a')
 
 " O: run fzf with bash explicitly so Vifm's configured fish syntax is not involved
 nnoremap <silent> O :set noquickview |

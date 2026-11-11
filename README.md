@@ -5,8 +5,8 @@ exponential moving sum), powered by bash, SQLite and
 [fzf](https://github.com/junegunn/fzf).
 
 It tracks **directories and files** in one database, ranks them by a
-time-decayed usage score, and lets you jump to any of them from a modal fzf UI
-with live preview. It integrates with vifm, fish, bash and Neovim, works over
+time-decayed usage score, and lets you search their unified history or use
+directory-only and file-only jumps. It integrates with vifm, fish, bash and Neovim, works over
 a tmux popup, and is equally usable as a standalone CLI.
 
 ## Why not zoxide?
@@ -16,14 +16,15 @@ a tmux popup, and is equally usable as a standalone CLI.
 | Tracks | directories only | **any topic** (dirs, files, shell commands, ...) |
 | Ranking | frecency score + global aging | event clock + EMS exponential decay |
 | Matching | substring | ordered / any-order **multi-word** + match-quality grading |
-| Bookmarks | none | **arbitrary keyword tags** — `M <tag>` records; shell `j <tag>` jumps directly (grade 0); unbook keeps the history |
+| Bookmarks | none | **arbitrary keyword tags** — `M <tag>` records; shell `j <tag>` or `J <tag>` searches the matching type; unbook keeps the history |
 | UI | terminal prompt (fzf picker via `zi`) | modal fzf (NORMAL/SEARCH, Vim keys) with live preview |
 | Curation | `zoxide delete` / `remove` | delete with undo, keyword bookmarks, keep-history unbookmark |
 | Preview | via `ZO_FZF_OPTS` customization | built-in: dirs / text / binary / command; missing paths are struck through and flagged for cleanup |
 
 Keyword bookmarks are the biggest day-to-day difference: a bookmark is an
 **arbitrary word** stored with the entry's full usage history — not one of 52
-single letters. In the shell, `j <tag>` selects a keyword match directly. In
+single letters. In the shell, `j <tag>` or `J <tag>` selects a directory or
+file keyword match directly. In
 vifm, `M` also creates a vifm bookmark via `vifm --remote`; `o` opens the
 history picker, where you can search for the tag. Dropping the tag never throws
 away the data.
@@ -53,9 +54,19 @@ These examples show the current behavior; history results depend on paths
 already recorded in your `file` topic.
 
 ```text
-# Bash or fish: multi-word path search. A directory match changes directory;
-# a file match changes to its parent and copies the path when wl-copy/xclip exists.
+# Bash or fish: directory-only jump
 $ j src parser
+
+# Bash or fish: file-only jump (copies the file path and enters its parent)
+$ J notes report
+
+# Bash or fish: unified directory/file history
+$ o notes
+
+# Vifm: unified history is o; type-specific command-line commands preserve
+# vifm's built-in j movement key.
+:j src parser
+:J notes report
 
 # Vifm: mark the current file or directory with a keyword. This also creates
 # a regular vifm bookmark. `o` opens the shared history picker; search `notes`.
@@ -66,26 +77,27 @@ vifm> o
 $ j notes
 ```
 
-For an arbitrary history entry, `j` uses query-aware match grading followed by
-the decayed usage score (EMS); the fzf history picker also previews files and
-directories. The path itself is recorded when visited/opened, while selecting
-it in the picker does not add a visit.
+`j` searches only directory history; `J` searches only file history. Both use
+query-aware match grading followed by the decayed usage score (EMS). The `o`
+picker remains the unified view and previews files and directories. Selecting
+an entry does not add a visit; directories and files are recorded when
+explicitly navigated to or opened.
 
 ### Integration behavior
 
-All integrations use the shared `file` topic, so directory and file records
-can appear in the same history list. Recording differs by host:
+All integrations can record to the unified history and to the matching
+type-specific history. These histories share `file.db` but have independent
+tables and event clocks. Recording differs by host:
 
 | Host | What records history | How it jumps or displays a `file` topic entry |
 |---|---|---|
-| Bash | `PROMPT_COMMAND` records changed directories; opening files through Bash is not automatically tracked. | `j` changes to a directory; for a file it changes to the parent and copies the file path when `wl-copy` or `xclip` is available. `Alt-T` inserts a selected history path. |
-| Fish | `PWD` hook records changed directories; opening files through Fish is not automatically tracked. | `j` has the same directory/file behavior as Bash. `Alt-T` inserts a selected history path. |
-| Vifm | `DirEnter` records directories; `l`/`Enter` records opened files; `M` records a keyword bookmark. | `o` opens the shared history picker and goes to a selected directory or file. `O` browses the current tree and does not use history. |
-| Neovim | `BufReadPost` records file buffers and `BufNewFile` records new files; a recent exact-path Vifm record is deduplicated. | No jump command or picker is provided by this integration; it records files into the shared topic. |
+| Bash | `PROMPT_COMMAND` records changed directories; opening files through Bash is not automatically tracked. | `o` searches unified history; `j` jumps to a directory; `J` selects a file, copies its path when `wl-copy` or `xclip` is available, and enters its parent. `Alt-T` inserts a unified history path. |
+| Fish | `PWD` hook records changed directories; opening files through Fish is not automatically tracked. | `o`, `j`, and `J` provide the same unified, directory, and file behavior as Bash. `Alt-T` inserts a unified history path. |
+| Vifm | `DirEnter` records directories; `l`/`Enter` records opened files; `M` records a keyword bookmark. | `o` opens unified history; `O` browses the current tree; `:j` and `:J` query directory and file history without overriding vifm's built-in `j` motion. |
+| Neovim | `BufReadPost` records file buffers and `BufNewFile` records new files; a recent exact-path Vifm record is deduplicated. | No jump command or picker is provided by this integration; it records to unified and file-specific history. |
 
-In Bash and fish, `j` on a file positions in its parent directory and copies
-the file path to the clipboard when `wl-copy` or `xclip` is available. In
-Vifm, the picker goes to the selected file. Neovim has no `j` integration.
+The integrations track explicit navigation and file opens. They do not monitor
+system-wide file-open events from unrelated applications.
 
 The scoring model was inspired by [ze](https://github.com/jghub/ze) and the
 design was iterated in [fzf#4789](https://github.com/junegunn/fzf/issues/4789).
@@ -236,14 +248,16 @@ user mappings (it cannot see vifm defaults, other sourced files or runtime
 
 Both integrations are installed by `install.sh` and provide:
 
-- `j` — z-like jump: a directory is `cd`'d into, a file opens its parent
-  directory and copies the path to the clipboard
-- automatic recording of every directory change in the `file` topic
+- `o` — jump from unified directory/file history
+- `j` — jump to the best matching directory-history entry
+- `J` — select a file-history entry, copy its path when a clipboard tool is
+  available, and enter its parent directory
+- automatic recording of directory changes to unified and directory history
 - `Alt-T` inserts a history path at the command line and copies it
   (fish and bash; in bash it overrides the default `M-t` transpose-words)
 
-Directories and files share one database (topic `file`), so `j` works for both.
-They only need `frecency` on `PATH` — the `~/.local/bin` symlink created by
+In the shell, `o` searches unified history while `j` and `J` query
+type-specific history. They only need `frecency` on `PATH` — the `~/.local/bin` symlink created by
 `--register` / `--bin-link` covers this.
 
 Load manually if needed:
@@ -266,13 +280,13 @@ registered in `init.lua` with a marked `dofile()` line:
 dofile("/home/youruser/.config/nvim/frecency/frecency.lua")
 ```
 
-It records opened files into the shared `file` topic. vifm already records a
-file when `l`/`<CR>` opens it, so before adding an entry the integration asks
-the database whether **this exact path** was recorded in the last 5 seconds
-(`frecency file recent 5 <path>`) and skips the record in that case,
-preventing the same navigation from being counted twice while unrelated
-writes (such as a directory change) do not suppress it. New files
-(`BufNewFile`) are always recorded since vifm cannot have seen them.
+It records opened files into unified and file-specific history. vifm already
+records a file when `l`/`<CR>` opens it, so before adding an entry the
+integration checks whether **this exact path** was recorded in the last 5
+seconds in either history and skips the record in that case, preventing the
+same navigation from being counted twice while unrelated writes (such as a
+directory change) do not suppress it. New files (`BufNewFile`) are always
+recorded since vifm cannot have seen them.
 
 ## Configuration
 
@@ -291,8 +305,14 @@ MAX_PATH_CHARS=60         # weighted display width before list paths abbreviate
 START_MODE=search         # 'search' starts with prompt ready, 'normal' with Vim keys
 START_DATA=all            # 'all' loads everything, 'last' only the LAST_LIMIT recent entries
 UNDO_KEEP=200             # how many deleted entries are kept for undo
+RECORD_UNIFIED=1          # also write to the unified `entries` history
+RECORD_SPLIT=1            # also write to the matching typed history
 IGNORE_PATTERNS=("*/fuse" "*/.git" "*/tmp/*" ... )  # globs never recorded
 ```
+
+Legacy entries remain in unified `entries` after upgrade. Split histories start
+accumulating when those directories and files are next visited or opened; the
+migration does not guess types for old or missing paths.
 
 To add ignored path patterns, put Bash array syntax in the topic config, for
 example `~/.local/share/frecency/file.config`:
@@ -357,7 +377,8 @@ releasing changes.
 
 ```bash
 frecency <topic> init                       # init / migrate schema (optional; lazily done on first use)
-frecency <topic> add <content> [keyword]    # record an entry
+frecency <topic> add [--route unified[,dir][,file]] <content> [keyword]
+                                             # write to selected history destinations
 frecency <topic> unbook <content>           # drop keyword, keep EMS history
 frecency <topic> query [term]               # open the fzf UI
 frecency <topic> jump-handler [term]        # best match / fzf picker -> cd command
@@ -366,6 +387,20 @@ frecency <topic> remove <content>           # delete (undoable in the UI)
 frecency <topic> recent <seconds> [content] # exit 0 if content (or anything) changed recently
 frecency <topic> cleanup                    # prune by MAX_ENTRIES / MAX_DAYS
 ```
+
+For the shared `file.db`, logical topics `file`, `file_dir`, and `file_file`
+select unified, directory-only, and file-only history. `add --route` selects
+write destinations; for example, `--route unified,dir` records a directory in
+both unified and directory history. Existing comma-separated topic arguments
+retain their meaning of operating on multiple topics.
+
+The integrations default to recording each event in unified and matching
+type-specific history. Set `RECORD_UNIFIED=0` in `file.config` to disable the
+unified destination, or `RECORD_SPLIT=0` to disable type-specific destinations;
+both may be enabled together. Type-specific history has independent event
+clocks, so file opens do not decay directory scores and directory visits do not
+decay file scores. This keeps three tables in one database file; the split
+tables are for distinct history semantics, not a claimed query-performance win.
 
 ## License
 

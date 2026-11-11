@@ -10,16 +10,27 @@
 #     source ~/.config/fish/frecency.fish
 #
 # Provides:
-#   j             z-like jump: directories cd, files open the parent directory
+#   o / j / J     unified history / directory history / file history
 #   Alt-T         pick a path from history and insert it at the command line
 #   PWD hook      record every directory change in the `file` topic
 
-# --- j: z-like jump from frecency history ---
-# A directory is cd'd into; a file copies its path to the clipboard and cd's to
-# its parent (handled by the script's jump-handler branch).
-function j --description "z-like jump from frecency history"
-    # "$argv" merges multiple words into one query (j foo bar -> "foo bar")
+# --- j / J: type-specific jumps ---
+function o --description "jump within unified frecency history"
     set -l cmd (frecency file jump-handler "$argv")
+    if test -n "$cmd"
+        eval $cmd
+    end
+end
+
+function j --description "z-like jump from frecency history"
+    set -l cmd (frecency file_dir jump-handler "$argv")
+    if test -n "$cmd"
+        eval $cmd
+    end
+end
+
+function J --description "jump within file history"
+    set -l cmd (frecency file_file jump-handler "$argv")
     if test -n "$cmd"
         eval $cmd
     end
@@ -46,7 +57,7 @@ end
 function __frecency_pwd_handler --on-variable PWD
     # Skip temporary and virtual directories
     if not string match -qr "^(/tmp/|/run/|/sys/|/proc/)" "$PWD"
-        nohup frecency file add "$PWD" >/dev/null 2>&1 & disown
+        nohup frecency file add --route unified,dir "$PWD" >/dev/null 2>&1 & disown
     end
 end
 

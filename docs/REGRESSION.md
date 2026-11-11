@@ -110,7 +110,7 @@ HOME="$test_home" scripts/frecency check init
   "SELECT (SELECT v FROM meta WHERE k='schema_version'), content, visits, tick FROM entries;"
 ```
 
-Expected: the query reports schema version `3`, preserves `/kept/path`, and
+Expected: the query reports schema version `4`, preserves `/kept/path`, and
 shows the migrated `visits` and `tick` values. The second init succeeds without
 changing the row. To exercise v2's bookmark-score migration, create a separate
 temporary home and fixture with the current columns but a v2 meta version:
@@ -137,8 +137,25 @@ HOME="$test_home" scripts/frecency check init
   "SELECT (SELECT v FROM meta WHERE k='schema_version'), score FROM entries WHERE content='/bookmarked/path';"
 ```
 
-Expected: the result is `3|1.0`, and the second init succeeds. Keep fixtures
+Expected: the result is `4|1.0`, and the second init succeeds. Keep fixtures
 disposable and never run migration experiments on a user's database.
+
+For routing coverage, use a fresh disposable home with an existing directory
+and file. Record a directory and a file to both unified and typed histories:
+
+```bash
+HOME="$test_home" scripts/frecency file add --route unified,dir "$test_home/alpha"
+HOME="$test_home" scripts/frecency file add --route unified,file "$test_home/alpha/src/parser.c"
+sqlite_bin=$(cat "$test_home/.local/share/frecency/.sqlite3.bin")
+"$sqlite_bin" "$test_home/.local/share/frecency/file.db" \
+  "SELECT (SELECT count(*) FROM entries), (SELECT count(*) FROM dir_entries), (SELECT count(*) FROM file_entries), (SELECT v FROM meta WHERE k='tick'), (SELECT v FROM meta WHERE k='dir_tick'), (SELECT v FROM meta WHERE k='file_tick');"
+```
+
+Expected: counts are `2|1|1` and the clocks are `2|1|1` (unified, directory,
+file). Set
+`RECORD_UNIFIED=0` in `file.config`, add another path with `--route
+unified,dir`, and confirm only `dir_entries` changes. Restore the default for
+later checks. UI and host integration behavior still requires manual testing.
 
 ## Not covered by this checklist
 

@@ -7,8 +7,7 @@
 --     -- #frecency for nvim
 --     dofile("<absolute path to this file>")
 --
--- Records opened files into the shared `file` topic, the same database the
--- vifm and shell integrations use.
+-- Records opened files into unified and file-specific history in file.db.
 --
 -- Deduplication: vifm records a file when it is opened with l/<CR>. When this
 -- exact path was recorded within the last 5 seconds, the visit is assumed to
@@ -58,7 +57,13 @@ local function record(path)
     vim.fn.jobstart({ "frecency", "file", "recent", "5", path }, {
         on_exit = function(_, code)
             if code ~= 0 then
-                vim.fn.jobstart({ "frecency", "file", "add", path })
+                vim.fn.jobstart({ "frecency", "file_file", "recent", "5", path }, {
+                    on_exit = function(_, split_code)
+                        if split_code ~= 0 then
+                            vim.fn.jobstart({ "frecency", "file", "add", "--route", "unified,file", path })
+                        end
+                    end,
+                })
             end
         end,
     })
@@ -93,7 +98,7 @@ vim.api.nvim_create_autocmd({ "BufReadPost", "BufNewFile" }, {
 
         if ev.event == "BufNewFile" then
             -- A brand-new file cannot have been recorded by vifm; add directly.
-            vim.fn.jobstart({ "frecency", "file", "add", path })
+            vim.fn.jobstart({ "frecency", "file", "add", "--route", "unified,file", path })
         else
             record(path)
         end

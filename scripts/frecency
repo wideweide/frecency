@@ -3,6 +3,7 @@
 # frecency - navigation/history entry manager with time decay (SQLite + fzf)
 # ============================================================================
 # Features:
+#   - Unified plus type-specific directory/file history in one SQLite database
 #   - Multiple topics: dir / file / cmd / any custom topic, each with its own DB
 #   - True frecency: event clock + exponential moving sum (EMS); decay on write,
 #     alignment on read
@@ -30,8 +31,10 @@
 #
 # Usage:
 #    frecency <topic> init                     : initialize/migrate the database
-#    frecency <topic> add <content> [keyword]  : record an entry (topic may be a
-#                                                comma-separated list)
+#    frecency <topic> add [--route targets] <content> [keyword]
+#                                              : record to unified/typed tables
+#    frecency file_dir <action>                : directory-only history in file.db
+#    frecency file_file <action>               : file-only history in file.db
 #    frecency <topic> unbook <content>         : remove bookmark, keep EMS history
 #    frecency <topic> query [search_term]      : open the fzf UI
 #    frecency <topic> jump-handler [term]      : shell / vifm integration
@@ -42,8 +45,8 @@
 #                                                updated within the last N seconds
 #    frecency <topic> cleanup                  : manual maintenance
 #
-# The generic interface accepts comma-separated topics; the Vifm/Fish/Neovim
-# integration uses `file` for both directories and files:
+# The generic interface accepts comma-separated topics; `file`, `file_dir`, and
+# `file_file` share file.db and address the unified, directory, and file histories.
 #    frecency topic-a,topic-b add /path/to/x
 #
 # Dependencies:
@@ -66,7 +69,7 @@ fi
 # avoiding the old \t problem where a TAB in a path truncated the entry.
 SEP=$'\x1f'
 
-SCHEMA_VERSION=3
+SCHEMA_VERSION=4
 
 # --- Paths and Identity ---
 DATA_DIR="$HOME/.local/share/frecency"
@@ -76,6 +79,9 @@ SCRIPT_DIR=$(dirname "$SELF")
 TOPIC="${1:-default}"
 ACTION="$2"
 [ -n "$ACTION" ] && shift 2
+ENTRY_TABLE=entries
+TRASH_TABLE=deleted_entries
+TICK_KEY=tick
 
 # --- Architecture detection (must match frecency-test) ---
 _sqlite_arch=""
@@ -111,6 +117,8 @@ GRADE_MODE=on
 MULTIWORD_MODE=ordered # ordered (default) or any-order; toggled with s in sqlite UI
 LAMBDA=0.01         # decay constant (per visit); half-life = ln2/LAMBDA
 UNDO_KEEP=200       # number of deleted_entries kept
+RECORD_UNIFIED=1    # shared file history; set to 0 in file.config to disable
+RECORD_SPLIT=1      # directory/file-specific history; set to 0 to disable
 IGNORE_PATTERNS=(
     "*/fuse"        # FUSE mount point
     "*/fuse/*"      # files inside FUSE mounts
@@ -370,6 +378,26 @@ CREATE TABLE IF NOT EXISTS deleted_entries (
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 
 INSERT OR IGNORE INTO meta VALUES ('schema_version','$SCHEMA_VERSION'), ('tick','0');
+INSERT OR IGNORE INTO meta VALUES ('dir_tick','0'), ('file_tick','0');
+
+CREATE TABLE IF NOT EXISTS dir_entries (
+    content TEXT PRIMARY KEY, keyword TEXT DEFAULT '', score REAL DEFAULT 1.0,
+    visits INTEGER DEFAULT 1, tick INTEGER DEFAULT 0,
+    last_access DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS file_entries (
+    content TEXT PRIMARY KEY, keyword TEXT DEFAULT '', score REAL DEFAULT 1.0,
+    visits INTEGER DEFAULT 1, tick INTEGER DEFAULT 0,
+    last_access DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS dir_deleted_entries (
+    content TEXT PRIMARY KEY, keyword TEXT, score REAL,
+    deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS file_deleted_entries (
+    content TEXT PRIMARY KEY, keyword TEXT, score REAL,
+    deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 " >/dev/null 2>&1 || {
         printf 'frecency: failed to create base database schema: %s\n' "$DB_PATH" >&2
         return 1
@@ -411,6 +439,14 @@ CREATE INDEX IF NOT EXISTS idx_entries_frecency ON entries (score DESC, last_acc
 CREATE INDEX IF NOT EXISTS idx_entries_keyword ON entries (keyword) WHERE keyword != '';
 CREATE INDEX IF NOT EXISTS idx_entries_tick ON entries (tick);
 CREATE INDEX IF NOT EXISTS idx_deleted_at ON deleted_entries (deleted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dir_frecency ON dir_entries (score DESC, last_access DESC);
+CREATE INDEX IF NOT EXISTS idx_dir_keyword ON dir_entries (keyword) WHERE keyword != '';
+CREATE INDEX IF NOT EXISTS idx_dir_tick ON dir_entries (tick);
+CREATE INDEX IF NOT EXISTS idx_dir_deleted_at ON dir_deleted_entries (deleted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_file_frecency ON file_entries (score DESC, last_access DESC);
+CREATE INDEX IF NOT EXISTS idx_file_keyword ON file_entries (keyword) WHERE keyword != '';
+CREATE INDEX IF NOT EXISTS idx_file_tick ON file_entries (tick);
+CREATE INDEX IF NOT EXISTS idx_file_deleted_at ON file_deleted_entries (deleted_at DESC);
 UPDATE meta SET v = '$SCHEMA_VERSION' WHERE k = 'schema_version';
 " >/dev/null 2>&1 || {
         printf 'frecency: failed to create indexes or update schema version: %s\n' "$DB_PATH" >&2
@@ -476,22 +512,22 @@ _require_math_functions() {
 #   write score = <expr> + 1   (meta.tick was already incremented; expr subtracts old tick)
 #   read current = <expr>      (sorting / cleanup / display must use this, not stored)
 _decay_expr() {
-    local dt="((SELECT CAST(v AS INTEGER) FROM meta WHERE k = 'tick') - tick)"
+    local dt="((SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$TICK_KEY') - tick)"
     printf 'score * exp(-%s * %s)' "$LAMBDA" "$dt"
 }
 
 do_cleanup() {
     _ensure_ready || return 1
     run_sql "
-DELETE FROM entries WHERE keyword = '' AND last_access < datetime('now', '-$MAX_DAYS days');
-DELETE FROM entries
+DELETE FROM $ENTRY_TABLE WHERE keyword = '' AND last_access < datetime('now', '-$MAX_DAYS days');
+DELETE FROM $ENTRY_TABLE
  WHERE keyword = ''
-   AND content IN (SELECT content FROM entries
+   AND content IN (SELECT content FROM $ENTRY_TABLE
                     WHERE keyword = ''
                     ORDER BY $(_decay_expr) DESC, last_access DESC
                     LIMIT -1 OFFSET $MAX_ENTRIES);
-DELETE FROM deleted_entries
- WHERE content NOT IN (SELECT content FROM deleted_entries
+DELETE FROM $TRASH_TABLE
+ WHERE content NOT IN (SELECT content FROM $TRASH_TABLE
                         ORDER BY deleted_at DESC LIMIT $UNDO_KEEP);
 " >/dev/null
 }
@@ -506,34 +542,103 @@ _do_upsert() {
     # entry from cleanup; it no longer inflates the EMS score.
     run_sql "
 BEGIN IMMEDIATE;
-UPDATE meta SET v = CAST(CAST(v AS INTEGER) + 1 AS TEXT) WHERE k = 'tick';
-INSERT INTO entries (content, keyword, score, visits, tick, last_access)
+UPDATE meta SET v = CAST(CAST(v AS INTEGER) + 1 AS TEXT) WHERE k = '$TICK_KEY';
+INSERT INTO $ENTRY_TABLE (content, keyword, score, visits, tick, last_access)
 VALUES ($(sql_lit "$content"), $(sql_lit "$keyword"), 1.0, 1,
-        (SELECT CAST(v AS INTEGER) FROM meta WHERE k = 'tick'), CURRENT_TIMESTAMP)
+        (SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$TICK_KEY'), CURRENT_TIMESTAMP)
 ON CONFLICT(content) DO UPDATE SET
     keyword = CASE WHEN $(sql_lit "$keyword") != '' THEN $(sql_lit "$keyword") ELSE keyword END,
     -- No floor: decaying to 1e-100 just means the next +1 is nearly 1; a floor only
     -- creates ties.
     score = $(_decay_expr) + 1,
     visits = visits + 1,
-    tick = (SELECT CAST(v AS INTEGER) FROM meta WHERE k = 'tick'),
+    tick = (SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$TICK_KEY'),
     last_access = CURRENT_TIMESTAMP;
 COMMIT;
 " >/dev/null
 }
 
+_do_upsert_route() {
+    local content="$1" keyword="$2" route_sql="BEGIN IMMEDIATE;" dest table tick_key
+    for dest in "${_route_targets[@]}"; do
+        case "$dest" in
+            unified) table=entries; tick_key=tick ;;
+            dir) table=dir_entries; tick_key=dir_tick ;;
+            file) table=file_entries; tick_key=file_tick ;;
+            *) continue ;;
+        esac
+        route_sql+="
+UPDATE meta SET v = CAST(CAST(v AS INTEGER) + 1 AS TEXT) WHERE k = '$tick_key';
+INSERT INTO $table (content, keyword, score, visits, tick, last_access)
+VALUES ($(sql_lit "$content"), $(sql_lit "$keyword"), 1.0, 1,
+        (SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key'), CURRENT_TIMESTAMP)
+ON CONFLICT(content) DO UPDATE SET
+    keyword = CASE WHEN $(sql_lit "$keyword") != '' THEN $(sql_lit "$keyword") ELSE keyword END,
+    score = score * exp(-$LAMBDA * ((SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key') - tick)) + 1,
+    visits = visits + 1,
+    tick = (SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key'),
+    last_access = CURRENT_TIMESTAMP;"
+    done
+    route_sql+=$'\nCOMMIT;'
+    run_sql "$route_sql" >/dev/null
+}
+
 do_add() {
-    local content="$1" keyword="$2"
+    local content="" keyword="" route="unified"
+    [[ "$TOPIC" == "file_dir" ]] && route=dir
+    [[ "$TOPIC" == "file_file" ]] && route=file
+    while (($#)); do
+        case "$1" in
+            --route)
+                (($# >= 2)) || { printf 'Usage: frecency <topic> add [--route unified[,dir][,file]] <content> [keyword]\n' >&2; return 2; }
+                route="$2"; shift 2 ;;
+            --route=*) route="${1#*=}"; shift ;;
+            *)
+                if [[ -z "$content" ]]; then content="$1"; else keyword="$1"; fi
+                shift ;;
+        esac
+    done
+    [[ -n "$content" ]] || { printf 'Usage: frecency <topic> add [--route destinations] <content> [keyword]\n' >&2; return 2; }
 
     for pattern in "${IGNORE_PATTERNS[@]}"; do
         [[ "$content" == $pattern ]] && return 0
     done
 
     _ensure_ready || return 1
-    _do_upsert "$content" "$keyword" || return 1
+    local dest
+    local -a requested_targets=()
+    IFS=',' read -r -a requested_targets <<< "$route"
+    _route_targets=()
+    local -A _route_seen=()
+    for dest in "${requested_targets[@]}"; do
+        case "$dest" in unified|dir|file) ;; *)
+            printf 'frecency: invalid --route destination: %s\n' "$dest" >&2
+            return 2 ;;
+        esac
+        [[ -n "${_route_seen[$dest]:-}" ]] && continue
+        _route_seen[$dest]=1
+        case "$dest" in
+            unified)
+                [[ "$RECORD_UNIFIED" == 1 ]] || continue
+                ;;
+            dir|file)
+                [[ "$RECORD_SPLIT" == 1 ]] || continue ;;
+        esac
+        _route_targets+=("$dest")
+    done
+    ((${#_route_targets[@]})) || return 0
+    _do_upsert_route "$content" "$keyword" || return 1
 
     # Probabilistic background maintenance (0.1%)
-    (( RANDOM % 1000 == 0 )) && $SELF "$TOPIC" cleanup >/dev/null 2>&1 &
+    if (( RANDOM % 1000 == 0 )); then
+        for dest in "${_route_targets[@]}"; do
+            case "$dest" in
+                unified) $SELF file cleanup >/dev/null 2>&1 & ;;
+                dir)     $SELF file_dir cleanup >/dev/null 2>&1 & ;;
+                file)    $SELF file_file cleanup >/dev/null 2>&1 & ;;
+            esac
+        done
+    fi
 }
 
 # recent <seconds> [content]: succeed if the entry <content> — or any entry
@@ -551,7 +656,7 @@ do_recent() {
     local where=""
     [[ -n "$content" ]] && where="AND content = $(sql_lit "$content")"
     local hit
-    hit=$(run_sql "SELECT 1 FROM entries
+    hit=$(run_sql "SELECT 1 FROM $ENTRY_TABLE
                    WHERE last_access >= datetime('now', '-$seconds seconds') $where
                    LIMIT 1;")
     [[ -n "$hit" ]]
@@ -564,7 +669,7 @@ do_preview() {
     local content="${1##*$SEP}"     # last field = the real path/command
     local db_info
     local path_missing=0
-    if [[ "$TOPIC" == "file" || "$TOPIC" == "dir" ]] && [[ ! -e "$content" ]]; then
+    if [[ "$TOPIC" == file* || "$TOPIC" == "dir" ]] && [[ ! -e "$content" ]]; then
         path_missing=1
     fi
 
@@ -606,7 +711,7 @@ do_preview() {
                    '$SEP' || IFNULL(CAST(grade AS TEXT), 'NULL')
             FROM (
                 SELECT inner.*, $grade_col AS grade
-                FROM (SELECT entries.* $from_extra FROM entries) AS inner
+                FROM (SELECT $ENTRY_TABLE.* $from_extra FROM $ENTRY_TABLE) AS inner
             )
             WHERE content = $(sql_lit "$content") LIMIT 1;")
     fi
@@ -666,7 +771,7 @@ do_preview() {
                 file -b "$content"; ls -ldh "$content" | awk '{print "Size: "$5"\nPerms: "$1"\nOwner: "$3}'
             fi
         fi
-    elif [[ "$TOPIC" == "file" || "$TOPIC" == "dir" ]]; then
+    elif [[ "$TOPIC" == file* || "$TOPIC" == "dir" ]]; then
         printf '%s%s%s\n' "${C_RED}${C_BOLD}" "!!! MISSING PATH !!!" "$C_NORMAL"
         printf 'This entry points to a path that no longer exists.\n\n'
         printf 'Available actions:\n'
@@ -770,7 +875,7 @@ _do_internal_query() {
             END,
             content,
             $grade_expr AS rank_grade
-        FROM (SELECT entries.*, $cur AS score_cur${sub_extra} FROM entries)"
+        FROM (SELECT $ENTRY_TABLE.*, $cur AS score_cur${sub_extra} FROM $ENTRY_TABLE)"
     # Output a display column plus the raw path column. fzf shows column 1 and
     # accepts column 2; sqlite mode searches full paths in SQL, so fzf can disable
     # local filtering without losing matching ability.
@@ -869,21 +974,21 @@ _do_internal_op() {
             ;;
         del)
             run_sql "
-INSERT OR REPLACE INTO deleted_entries (content, keyword, score)
-    SELECT content, keyword, score FROM entries WHERE content = $(sql_lit "$content");
-DELETE FROM entries WHERE content = $(sql_lit "$content");" >/dev/null
+INSERT OR REPLACE INTO $TRASH_TABLE (content, keyword, score)
+    SELECT content, keyword, score FROM $ENTRY_TABLE WHERE content = $(sql_lit "$content");
+DELETE FROM $ENTRY_TABLE WHERE content = $(sql_lit "$content");" >/dev/null
             ;;
         unbook)
-            run_sql "UPDATE entries SET keyword = '' WHERE content = $(sql_lit "$content");" >/dev/null
+            run_sql "UPDATE $ENTRY_TABLE SET keyword = '' WHERE content = $(sql_lit "$content");" >/dev/null
             ;;
         undo)
             run_sql "
-INSERT OR IGNORE INTO entries (content, keyword, score, visits, tick, last_access)
+INSERT OR IGNORE INTO $ENTRY_TABLE (content, keyword, score, visits, tick, last_access)
     SELECT content, keyword, score, 1,
-           (SELECT CAST(v AS INTEGER) FROM meta WHERE k='tick'), CURRENT_TIMESTAMP
-    FROM deleted_entries ORDER BY deleted_at DESC LIMIT 1;
-DELETE FROM deleted_entries WHERE content =
-    (SELECT content FROM deleted_entries ORDER BY deleted_at DESC LIMIT 1);" >/dev/null
+           (SELECT CAST(v AS INTEGER) FROM meta WHERE k='$TICK_KEY'), CURRENT_TIMESTAMP
+    FROM $TRASH_TABLE ORDER BY deleted_at DESC LIMIT 1;
+DELETE FROM $TRASH_TABLE WHERE content =
+    (SELECT content FROM $TRASH_TABLE ORDER BY deleted_at DESC LIMIT 1);" >/dev/null
             ;;
     esac
 }
@@ -892,12 +997,45 @@ do_unbook() {
     local content="$1" changed
     [[ -n "$content" ]] || { printf 'Usage: frecency <topic> unbook <content>\n' >&2; return 2; }
     _ensure_ready || return 1
-    changed=$(run_sql "UPDATE entries SET keyword = '' WHERE content = $(sql_lit "$content") AND keyword != ''; SELECT changes();")
+    changed=$(run_sql "UPDATE $ENTRY_TABLE SET keyword = '' WHERE content = $(sql_lit "$content") AND keyword != ''; SELECT changes();")
     if [[ "$changed" == "1" ]]; then
         printf 'Bookmark removed; EMS history retained: %s\n' "$content"
     else
         printf 'No bookmark found: %s\n' "$content"
     fi
+}
+
+do_remove() {
+    local route="unified" content="" dest old_table=$ENTRY_TABLE old_trash=$TRASH_TABLE old_tick=$TICK_KEY
+    [[ "$TOPIC" == "file_dir" ]] && route=dir
+    [[ "$TOPIC" == "file_file" ]] && route=file
+    while (($#)); do
+        case "$1" in
+            --route) (($# >= 2)) || return 2; route="$2"; shift 2 ;;
+            --route=*) route="${1#*=}"; shift ;;
+            *) content="$1"; shift ;;
+        esac
+    done
+    [[ -n "$content" ]] || { printf 'Usage: frecency <topic> remove [--route destinations] <content>\n' >&2; return 2; }
+    _ensure_ready || return 1
+    local -A seen=()
+    IFS=',' read -r -a _route_targets <<< "$route"
+    for dest in "${_route_targets[@]}"; do
+        case "$dest" in unified|dir|file) ;; *)
+            printf 'frecency: invalid --route destination: %s\n' "$dest" >&2
+            return 2 ;;
+        esac
+        [[ -n "${seen[$dest]:-}" ]] && continue
+        seen[$dest]=1
+        case "$dest" in
+            unified) ENTRY_TABLE=entries; TRASH_TABLE=deleted_entries; TICK_KEY=tick ;;
+            dir) ENTRY_TABLE=dir_entries; TRASH_TABLE=dir_deleted_entries; TICK_KEY=dir_tick ;;
+            file) ENTRY_TABLE=file_entries; TRASH_TABLE=file_deleted_entries; TICK_KEY=file_tick ;;
+            *) printf 'frecency: invalid --route destination: %s\n' "$dest" >&2; return 2 ;;
+        esac
+        _do_internal_op del "$content" || return 1
+    done
+    ENTRY_TABLE=$old_table; TRASH_TABLE=$old_trash; TICK_KEY=$old_tick
 }
 
 # ============================================================================
@@ -1051,7 +1189,23 @@ do_jump_handler() {
 
     if [[ "$TOPIC" == "cmd" ]]; then printf '%s\n' "$raw_path"; exit 0; fi
 
-    if [[ -d "$raw_path" ]]; then
+    if [[ "$TOPIC" == "file_dir" ]]; then
+        [[ -d "$raw_path" ]] || { printf 'frecency: directory path not on disk: %s\n' "$raw_path" >&2; exit 1; }
+        printf "cd '%s'\n" "$(shq "$raw_path")"
+    elif [[ "$TOPIC" == "file_file" ]]; then
+        [[ -f "$raw_path" ]] || { printf 'frecency: file path not on disk: %s\n' "$raw_path" >&2; exit 1; }
+        if [[ "$ACTION" == *"vifm" ]]; then
+            printf "goto '%s'\n" "$(shq "$raw_path")"
+        else
+            if [[ "$XDG_SESSION_TYPE" == "wayland" ]] && command -v wl-copy >/dev/null; then
+                printf '%s' "$raw_path" | wl-copy
+            elif command -v xclip >/dev/null; then
+                printf '%s' "$raw_path" | xclip -selection clipboard
+            fi
+            printf "cd '%s'; printf '%%s\\n' '%s'\n" \
+                "$(shq "$(dirname "$raw_path")")" "$(shq "Copied path: $raw_path")"
+        fi
+    elif [[ -d "$raw_path" ]]; then
         printf "cd '%s'\n" "$(shq "$raw_path")"
     elif [[ -f "$raw_path" ]]; then
         # Selection itself is not a visit (no score bump here): navigating to
@@ -1069,7 +1223,7 @@ do_jump_handler() {
                 "$(shq "$(dirname "$raw_path")")" "$(shq "Copied path: $raw_path")"
         fi
     else
-        if [[ "$TOPIC" == "dir" || "$TOPIC" == "file" ]]; then
+        if [[ "$TOPIC" == "dir" || "$TOPIC" == file* ]]; then
             printf '%sError:%s Path not on disk: %s\n' "$C_YELLOW" "$C_NORMAL" "$raw_path" >&2
             exit 1
         else
@@ -1086,9 +1240,18 @@ _require_sqlite3
 IFS=',' read -r -a TOPICS <<< "$TOPIC"
 
 for _T in "${TOPICS[@]}"; do
-    export DB_PATH="$DATA_DIR/${_T}.db"
+    case "$_T" in
+        file|file_dir|file_file) export DB_PATH="$DATA_DIR/file.db" ;;
+        *)                       export DB_PATH="$DATA_DIR/${_T}.db" ;;
+    esac
     export CONFIG_PATH="$DATA_DIR/${_T}.config"
-    export MARKER="$DATA_DIR/.${_T}.v3"
+    export MARKER="$DATA_DIR/.${_T}.v4"
+
+    case "$_T" in
+        file_dir) ENTRY_TABLE=dir_entries; TRASH_TABLE=dir_deleted_entries; TICK_KEY=dir_tick ;;
+        file_file) ENTRY_TABLE=file_entries; TRASH_TABLE=file_deleted_entries; TICK_KEY=file_tick ;;
+        *) ENTRY_TABLE=entries; TRASH_TABLE=deleted_entries; TICK_KEY=tick ;;
+    esac
 
     # Per-topic configuration overrides
     [[ -f "$CONFIG_PATH" ]] && source "$CONFIG_PATH"
@@ -1096,9 +1259,9 @@ for _T in "${TOPICS[@]}"; do
     case "$ACTION" in
         init)           _initialize 1 ;;
         cleanup)        do_cleanup ;;
-        add)            do_add "$1" "$2" ;;
+        add)            do_add "$@" ;;
         unbook)         do_unbook "$1" ;;
-        remove)         _do_internal_op del "$1" ;;
+        remove)         do_remove "$@" ;;
         recent)         do_recent "$1" "$2" ;;
         query)          do_query_ui "$1" ;;
         preview)        do_preview "$1" ;;

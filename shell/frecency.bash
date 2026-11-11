@@ -9,17 +9,27 @@
 #     source ~/.config/frecency/frecency.bash
 #
 # Provides:
-#   j             z-like jump: directories cd, files open the parent directory
+#   o / j / J     unified history / directory history / file history
 #   Alt-T         pick a path from history and insert it at the command line
 #   PROMPT_COMMAND hook
 #                 record every directory change in the `file` topic
 
-# --- j: z-like jump from frecency history ---
-# A directory is cd'd into; a file copies its path to the clipboard and cd's to
-# its parent (handled by the script's jump-handler branch).
-j() {
+# --- j / J: type-specific jumps ---
+o() {
     local cmd
     cmd=$(frecency file jump-handler "$*") || return
+    [[ -n "$cmd" ]] && eval "$cmd"
+}
+
+j() {
+    local cmd
+    cmd=$(frecency file_dir jump-handler "$*") || return
+    [[ -n "$cmd" ]] && eval "$cmd"
+}
+
+J() {
+    local cmd
+    cmd=$(frecency file_file jump-handler "$*") || return
     [[ -n "$cmd" ]] && eval "$cmd"
 }
 
@@ -55,7 +65,7 @@ __frecency_pwd_handler() {
     esac
     # disown removes the job from the job table, so bash does not print a
     # "[1]+ Done" notification at the next prompt.
-    nohup frecency file add "$PWD" >/dev/null 2>&1 &
+    nohup frecency file add --route unified,dir "$PWD" >/dev/null 2>&1 &
     disown
 }
 
