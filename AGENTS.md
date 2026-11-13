@@ -20,6 +20,20 @@ run, blockers, and next action. Keep queued work in `docs/TASKS.md`; do not
 duplicate the same status in both files. If a state file disagrees with the
 code or `git status`, treat the code as authoritative and reconcile the file.
 
+## Common commands
+
+Run only the checks relevant to the change; `docs/ACCEPTANCE.md` defines the
+full gates. Use a disposable `HOME` for database and CLI probes.
+
+```bash
+bash -n scripts/frecency scripts/frecency-test scripts/bmark.sh shell/frecency.bash install.sh
+fish -n shell/frecency.fish
+scripts/frecency-test                 # SQLite/fzf dependency self-check (writes the sqlite cache)
+./install.sh --dry-run --register     # preview install and registration
+./install.sh --register               # refresh the local runtime only when requested
+git diff --check
+```
+
 ## Source map
 
 - `scripts/frecency`: CLI, database schema/migrations, scoring, querying, preview and fzf UI.

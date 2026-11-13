@@ -12,7 +12,8 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
   pre-branches, missing-match errors, Bash prompt change detection, and the
   unified `file` decay constant.
 - Handoff docs: 2026-11-13 added tracked `STATE.md`, `TASKS.md`, and
-  `ACCEPTANCE.md`; `AGENTS.md` now defines the read order.
+  `ACCEPTANCE.md`; `AGENTS.md` now defines the read order, update protocol, and
+  common commands.
 - Next action: none queued; see [`TASKS.md`](TASKS.md).
 - Blockers: none.
 
