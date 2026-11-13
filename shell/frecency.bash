@@ -59,7 +59,17 @@ if [[ $- == *i* ]]; then
 fi
 
 # --- Automatically record directory changes ---
+# The event clock must tick on navigation, not on every prompt: fish tracks
+# PWD changes through its variable hook, but bash has no equivalent, so
+# compare $PWD against the last value seen at a prompt and record only real
+# changes. Filtered directories still update the comparison value, so leaving
+# one for a previously visited directory is still detected as a change.
+__frecency_last_pwd=""
 __frecency_pwd_handler() {
+    local changed=0
+    [[ "$PWD" != "$__frecency_last_pwd" ]] && changed=1
+    __frecency_last_pwd=$PWD
+    ((changed)) || return 0
     case "$PWD" in
         /tmp/*|/run/*|/sys/*|/proc/*) return 0 ;;
     esac
