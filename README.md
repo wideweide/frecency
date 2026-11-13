@@ -103,10 +103,16 @@ The scoring model was inspired by [ze](https://github.com/jghub/ze) and the
 design was iterated in [fzf#4789](https://github.com/junegunn/fzf/issues/4789).
 
 ```
-every navigation ticks a global event clock:
+every navigation ticks that history's event clock:
     score = score * exp(-LAMBDA * (tick_now - tick_last)) + 1
-half-life = ln(2)/LAMBDA ≈ 69 navigations (LAMBDA = 0.01)
+half-life = ln(2)/LAMBDA navigation events
+unified `file` history:       LAMBDA = 0.005  -> about 139 events
+directory/file-only history:  LAMBDA = 0.01   -> about 69 events
 ```
+
+The unified clock counts both directory visits and file opens, so its LAMBDA is
+halved to keep a similar decay per wall-clock day. Half-lives are counted in
+navigation events, not days; convert with your own event rate.
 
 Old entries fade out naturally; a vacation won't wipe your history (the clock
 only ticks on real navigation events, not on wall time).
@@ -313,7 +319,8 @@ SEARCH_MODE=sqlite        # sqlite: per-keystroke SQL query (default)
                           # fzf:    load all at once, zero-latency local filter
 GRADE_MODE=on             # rank by match quality (keyword/last-segment grades)
 MULTIWORD_MODE=ordered    # ordered (foo bar matches foo*bar) or any-order
-LAMBDA=0.01               # decay constant; half-life = ln(2)/LAMBDA navigations
+LAMBDA=0.01               # decay per navigation event; the unified `file`
+                          # history defaults to 0.005
 MAX_ENTRIES=10000         # cleanup threshold
 MAX_DAYS=300              # entries untouched for this long are cleaned up
 MAX_PATH_CHARS=60         # weighted display width before list paths abbreviate
@@ -324,6 +331,11 @@ RECORD_UNIFIED=1          # also write to the unified `entries` history
 RECORD_SPLIT=1            # also write to the matching typed history
 IGNORE_PATTERNS=("*/fuse" "*/.git" "*/tmp/*" ... )  # globs never recorded
 ```
+
+The unified `file` history defaults to `LAMBDA=0.005` because its clock also
+counts file events; `file_dir`, `file_file`, and other topics default to
+`0.01`. A `LAMBDA` set in a topic config overrides the default for every
+destination that topic writes.
 
 Legacy entries remain in unified `entries` after upgrade. Split histories start
 accumulating when those directories and files are next visited or opened; the

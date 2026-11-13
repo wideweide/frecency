@@ -25,7 +25,9 @@
 #   the tick at that moment; different entries hold scores at different ticks and
 #   cannot be compared directly. Sorting / cleanup / display always use current,
 #   aligning every entry to the same moment.
-#   Half-life = ln(2)/LAMBDA visits. LAMBDA=0.01 -> about 69 visits.
+#   Half-life = ln(2)/LAMBDA visits. The unified `file` history pools
+#   directory visits and file opens, so it defaults to LAMBDA=0.005 (about
+#   139 visits); other topics keep 0.01 (about 69 visits).
 #   This prevents old entries from dominating forever and avoids losing all
 #   history after a long break.
 #
@@ -116,6 +118,12 @@ SEARCH_MODE=sqlite
 GRADE_MODE=on
 MULTIWORD_MODE=ordered # ordered (default) or any-order; toggled with s in sqlite UI
 LAMBDA=0.01         # decay constant (per visit); half-life = ln2/LAMBDA
+# Effective decay constants for the destinations a single `add --route` may
+# touch. The main router refreshes these per logical topic; the unified file
+# history uses half the baseline because its clock also counts file events.
+_LAMBDA_UNIFIED=0.01
+_LAMBDA_DIR=0.01
+_LAMBDA_FILE=0.01
 UNDO_KEEP=200       # number of deleted_entries kept
 RECORD_UNIFIED=1    # shared file history; set to 0 in file.config to disable
 RECORD_SPLIT=1      # directory/file-specific history; set to 0 to disable
@@ -559,12 +567,12 @@ COMMIT;
 }
 
 _do_upsert_route() {
-    local content="$1" keyword="$2" route_sql="BEGIN IMMEDIATE;" dest table tick_key
+    local content="$1" keyword="$2" route_sql="BEGIN IMMEDIATE;" dest table tick_key lambda
     for dest in "${_route_targets[@]}"; do
         case "$dest" in
-            unified) table=entries; tick_key=tick ;;
-            dir) table=dir_entries; tick_key=dir_tick ;;
-            file) table=file_entries; tick_key=file_tick ;;
+            unified) table=entries; tick_key=tick; lambda=$_LAMBDA_UNIFIED ;;
+            dir) table=dir_entries; tick_key=dir_tick; lambda=$_LAMBDA_DIR ;;
+            file) table=file_entries; tick_key=file_tick; lambda=$_LAMBDA_FILE ;;
             *) continue ;;
         esac
         route_sql+="
@@ -574,7 +582,7 @@ VALUES ($(sql_lit "$content"), $(sql_lit "$keyword"), 1.0, 1,
         (SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key'), CURRENT_TIMESTAMP)
 ON CONFLICT(content) DO UPDATE SET
     keyword = CASE WHEN $(sql_lit "$keyword") != '' THEN $(sql_lit "$keyword") ELSE keyword END,
-    score = score * exp(-$LAMBDA * ((SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key') - tick)) + 1,
+    score = score * exp(-$lambda * ((SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key') - tick)) + 1,
     visits = visits + 1,
     tick = (SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key'),
     last_access = CURRENT_TIMESTAMP;"
@@ -1267,8 +1275,37 @@ for _T in "${TOPICS[@]}"; do
         *) ENTRY_TABLE=entries; TRASH_TABLE=deleted_entries; TICK_KEY=tick ;;
     esac
 
+    # Default decay constant per logical topic: the unified `file` table pools
+    # directory visits and file opens, so its event clock sees roughly twice
+    # the events of a split table; halve LAMBDA to keep a similar wall-clock
+    # decay. Topic config files still override any default.
+    case "$_T" in
+        file) _lambda_default=0.005 ;;
+        *)    _lambda_default=0.01 ;;
+    esac
+    LAMBDA=$_lambda_default
+
     # Per-topic configuration overrides
     [[ -f "$CONFIG_PATH" ]] && source "$CONFIG_PATH"
+
+    if [[ "$LAMBDA" == "$_lambda_default" ]]; then
+        # No explicit override: keep the per-destination defaults so a mixed
+        # `--route unified,dir` / `--route unified,file` write decays the
+        # unified and split tables at their own rates.
+        if [[ "$DB_PATH" == "$DATA_DIR/file.db" ]]; then
+            _LAMBDA_UNIFIED=0.005
+        else
+            _LAMBDA_UNIFIED=0.01
+        fi
+        _LAMBDA_DIR=0.01
+        _LAMBDA_FILE=0.01
+    else
+        # An explicit LAMBDA in the topic config applies to every destination
+        # written by this invocation.
+        _LAMBDA_UNIFIED=$LAMBDA
+        _LAMBDA_DIR=$LAMBDA
+        _LAMBDA_FILE=$LAMBDA
+    fi
 
     case "$ACTION" in
         init)           _initialize 1 ;;
