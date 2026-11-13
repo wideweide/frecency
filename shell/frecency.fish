@@ -15,22 +15,78 @@
 #   PWD hook      record every directory change in the `file` topic
 
 # --- j / J: type-specific jumps ---
+# Copy a path to the clipboard (wl-copy first, xclip fallback), the same
+# behavior the jump handler and Alt-T use.
+function __frecency_copy_path --description "copy a path to the clipboard"
+    if command -qv wl-copy
+        printf '%s' "$argv[1]" | wl-copy
+    else if command -qv xclip
+        printf '%s' "$argv[1]" | xclip -selection clipboard
+    end
+end
+
+# Enter an existing file's parent and copy its absolute path: the same
+# semantics as selecting a file history entry, for the cd-compat pre-branch.
+function __frecency_open_file --description "enter a file's parent and copy its path"
+    set -l target $argv[1]
+    if not cd (dirname $target)
+        return 1
+    end
+    set target $PWD/(basename $target)
+    __frecency_copy_path $target
+    printf 'Copied path: %s\n' $target
+end
+
+# cd-compat pre-branch: with a single argument, `-` and existing paths are
+# honored before any history lookup (existing paths win over history
+# matches), so `alias cd=j` behaves like cd for plain navigation. Multi-word
+# arguments are always treated as history queries.
 function o --description "jump within unified frecency history"
+    if test (count $argv) -eq 1
+        if test -d "$argv[1]"
+            cd "$argv[1]"
+            return
+        end
+        if test -f "$argv[1]"
+            __frecency_open_file "$argv[1]"
+            return
+        end
+    end
     set -l cmd (frecency file jump-handler "$argv")
+    set -l rc $status
+    test $rc -eq 0; or return $rc
     if test -n "$cmd"
         eval $cmd
     end
 end
 
 function j --description "z-like jump from frecency history"
+    if test (count $argv) -eq 1
+        if test "$argv[1]" = "-"
+            cd -
+            return
+        end
+        if test -d "$argv[1]"
+            cd "$argv[1]"
+            return
+        end
+    end
     set -l cmd (frecency file_dir jump-handler "$argv")
+    set -l rc $status
+    test $rc -eq 0; or return $rc
     if test -n "$cmd"
         eval $cmd
     end
 end
 
 function J --description "jump within file history"
+    if test (count $argv) -eq 1; and test -f "$argv[1]"
+        __frecency_open_file "$argv[1]"
+        return
+    end
     set -l cmd (frecency file_file jump-handler "$argv")
+    set -l rc $status
+    test $rc -eq 0; or return $rc
     if test -n "$cmd"
         eval $cmd
     end

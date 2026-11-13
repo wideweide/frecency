@@ -249,16 +249,31 @@ user mappings (it cannot see vifm defaults, other sourced files or runtime
 Both integrations are installed by `install.sh` and provide:
 
 - `o` — jump from unified directory/file history
-- `j` — jump to the best matching directory-history entry
+- `j` — jump to the best matching directory-history entry; `j -` behaves like
+  `cd -`
 - `J` — select a file-history entry, copy its path when a clipboard tool is
   available, and enter its parent directory
-- automatic recording of directory changes to unified and directory history
+- `j`, `J`, and `o` also accept an existing path (a directory for `j`, a file
+  for `J`, either for `o`) and act on it directly, before consulting history.
+  Existing paths win over history matches; multi-word arguments are always
+  treated as history queries.
+- automatic recording of changed directories to unified and directory history.
+  The Bash hook only writes when `$PWD` actually changes; filtered directories
+  still update the remembered value, so returning from one is recorded.
 - `Alt-T` inserts a history path at the command line and copies it
   (fish and bash; in bash it overrides the default `M-t` transpose-words)
 
 In the shell, `o` searches unified history while `j` and `J` query
 type-specific history. They only need `frecency` on `PATH` — the `~/.local/bin` symlink created by
 `--register` / `--bin-link` covers this.
+
+With a single argument, `j` first checks `-` and an existing directory, and
+`J`/`o` first check for an existing file (or directory, for `o`). Bare `j`,
+`J`, and `o` still open the fzf picker. A non-empty query that matches nothing
+prints `frecency: no history match for: <query>` to stderr and exits non-zero,
+so `alias cd=j` covers ordinary `cd <dir>` navigation. The alias also makes
+bare `cd` open the picker; use `command cd` when you want the shell's built-in
+behavior, such as going home with no argument.
 
 Load manually if needed:
 
@@ -393,6 +408,10 @@ select unified, directory-only, and file-only history. `add --route` selects
 write destinations; for example, `--route unified,dir` records a directory in
 both unified and directory history. Existing comma-separated topic arguments
 retain their meaning of operating on multiple topics.
+
+With a non-empty query, a `file`, `file_dir`, or `file_file` `jump-handler`
+that finds no match prints an error to stderr and exits non-zero; the
+`jump-handler-vifm` flavour keeps its previous silent behavior.
 
 The integrations default to recording each event in unified and matching
 type-specific history. Set `RECORD_UNIFIED=0` in `file.config` to disable the

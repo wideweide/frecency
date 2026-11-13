@@ -1181,10 +1181,24 @@ do_jump_handler() {
         # EMS + match grade (first internal-query row = highest grade, then highest
         # score_cur within that grade).
         res=$($SELF "$TOPIC" internal-query all "$term" | head -n 1)
+        if [[ -z "$res" ]]; then
+            # The shell integrations pre-check `-` and existing paths, so a
+            # non-empty term that reaches here matched nothing. Report it instead
+            # of exiting silently: aliasing cd to `j` expects cd-style failure.
+            case "$TOPIC" in
+                file|file_dir|file_file)
+                    if [[ "$ACTION" != *"vifm" ]]; then
+                        printf 'frecency: no history match for: %s\n' "$term" >&2
+                        exit 1
+                    fi
+                    ;;
+            esac
+            exit 0
+        fi
     else
         res=$($SELF "$TOPIC" query) || exit 0
+        [[ -z "$res" ]] && exit 0
     fi
-    [[ -z "$res" ]] && exit 0
     local raw_path="${res##*$SEP}"
 
     if [[ "$TOPIC" == "cmd" ]]; then printf '%s\n' "$raw_path"; exit 0; fi
