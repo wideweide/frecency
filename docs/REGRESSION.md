@@ -1,5 +1,8 @@
 # Maintainer regression checklist
 
+Project-wide acceptance gates are in [`ACCEPTANCE.md`](ACCEPTANCE.md); record
+the checks you actually ran in [`STATE.md`](STATE.md).
+
 Run these checks after changes to the matching area. Interactive UI checks need
 the supported fzf version and a terminal. Use a disposable home for database
 checks so the examples do not touch your normal history.
