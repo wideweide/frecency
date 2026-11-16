@@ -5,9 +5,9 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
 
-- Branch: `main`; last code commit `e9bf4fb` (2026-11-16), pushed to
+- Branch: `main`; last code commit `08f4778` (2026-11-16), pushed to
   `origin/main`. The untracked `2026-11-16/` review notes are intentionally not
-  committed. DLT `docs/frecency.md` synced in `1e155bf`.
+  committed. DLT `docs/frecency.md` synced in `9be0ed7`.
 - Active task: none.
 - Last code change: added Bash/fish `jc`/`je` helpers and NORMAL-mode fzf
   `c`/`v`/`e` (exit, no navigation) plus `C`/`V`/`E` (stay, tmux window when
