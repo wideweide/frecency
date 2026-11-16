@@ -21,6 +21,18 @@ _None._
   - Verification: follow the host sections in `REGRESSION.md`; never run
     migration experiments against a real user database.
 
+- [ ] Manual interactive checks for `ji` and NORMAL-mode `c`/`v`/`e` actions.
+  - Context: the picker and key bindings need a terminal and the supported fzf
+    version; the automated run only verified flag parsing, bind syntax, and
+    pty-driven key presses on one machine.
+  - Acceptance: `ji` opens with an optional initial query; lowercase `c`/`v`/`e`
+    copy/view/edit and leave fzf without emitting a path; uppercase `C`/`V`/`E`
+    do the same while fzf stays (tmux window when available); `Enter` remains
+    the only navigation exit.
+  - Verification: open `file` and `file_file` pickers in NORMAL mode, then
+    repeat in SEARCH mode to confirm those keys only filter there. See the
+    "fzf action keys" section in `REGRESSION.md`.
+
 ## Task template
 
 - [ ] `<task-id>` — `<one-line outcome>`

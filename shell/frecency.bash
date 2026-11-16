@@ -10,13 +10,14 @@
 #
 # Provides:
 #   o / j / J     unified history / directory history / file history
+#   ji            interactive directory-history picker
+#   jc / je       copy a selected file path / edit it with vim
 #   Alt-T         pick a path from history and insert it at the command line
 #   PROMPT_COMMAND hook
 #                 record every directory change in the `file` topic
 
 # --- j / J: type-specific jumps ---
-# Copy a path to the clipboard (wl-copy first, xclip fallback), the same
-# behavior the jump handler and Alt-T use.
+# Copy a path to the clipboard (wl-copy first, xclip fallback), used by Alt-T.
 __frecency_copy_path() {
     if command -v wl-copy >/dev/null 2>&1; then
         printf '%s' "$1" | wl-copy
@@ -25,14 +26,13 @@ __frecency_copy_path() {
     fi
 }
 
-# Enter an existing file's parent and copy its absolute path: the same
-# semantics as selecting a file history entry, for the cd-compat pre-branch.
-__frecency_open_file() {
-    local target=$1
-    cd -- "$(dirname -- "$target")" || return 1
-    target=$PWD/${target##*/}
-    __frecency_copy_path "$target"
-    printf 'Copied path: %s\n' "$target"
+# Print an absolute path without changing directory or touching the clipboard.
+__frecency_emit_path() {
+    local path=$1
+    if [[ "$path" != /* ]]; then
+        path=$(readlink -f -- "$path" 2>/dev/null || printf '%s' "$path")
+    fi
+    printf '%s\n' "$path"
 }
 
 # cd-compat pre-branch: with a single argument, `-` and existing paths are
@@ -46,16 +46,25 @@ o() {
             return
         fi
         if [[ -f "$1" ]]; then
-            __frecency_open_file "$1"
+            __frecency_emit_path "$1"
             return
         fi
     fi
-    local cmd
-    cmd=$(frecency file jump-handler "$*") || return
-    [[ -n "$cmd" ]] && eval "$cmd"
+    local sel
+    sel=$(frecency file jump-handler --emit=path "$*") || return
+    [[ -z "$sel" ]] && return 0
+    if [[ -d "$sel" ]]; then
+        cd -- "$sel"
+    else
+        __frecency_emit_path "$sel"
+    fi
 }
 
 j() {
+    if (( $# == 0 )); then
+        cd -- "$HOME"
+        return
+    fi
     if (( $# == 1 )); then
         if [[ "$1" == "-" ]]; then
             cd -
@@ -68,17 +77,45 @@ j() {
     fi
     local cmd
     cmd=$(frecency file_dir jump-handler "$*") || return
-    [[ -n "$cmd" ]] && eval "$cmd"
+    # An fzf abort produces no output; return quietly instead of failing.
+    [[ -z "$cmd" ]] && return 0
+    eval "$cmd"
+}
+
+# Interactive directory-history picker (zoxide `zi` equivalent).
+ji() {
+    local cmd
+    cmd=$(frecency file_dir jump-handler --picker "$*") || return
+    [[ -z "$cmd" ]] && return 0
+    eval "$cmd"
 }
 
 J() {
     if (( $# == 1 )) && [[ -f "$1" ]]; then
-        __frecency_open_file "$1"
+        __frecency_emit_path "$1"
         return
     fi
-    local cmd
-    cmd=$(frecency file_file jump-handler "$*") || return
-    [[ -n "$cmd" ]] && eval "$cmd"
+    local path
+    path=$(frecency file_file jump-handler --emit=path "$*") || return
+    [[ -z "$path" ]] && return 0
+    __frecency_emit_path "$path"
+}
+
+# Copy a selected file path to the clipboard (no trailing newline) or edit it
+# with vim. Both reuse J, so they inherit its query/abort behavior and never
+# change the working directory.
+jc() {
+    local f
+    f=$(J "$@") || return
+    [[ -n "$f" ]] || return 0
+    printf '%s' "$f" | wl-copy
+}
+
+je() {
+    local f
+    f=$(J "$@") || return
+    [[ -n "$f" ]] || return 0
+    vim -- "$f"
 }
 
 # --- Pick a path from history into the command line (Alt-T) ---

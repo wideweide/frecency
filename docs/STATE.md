@@ -1,20 +1,19 @@
 # Project state
 
-Last updated: 2026-11-13
+Last updated: 2026-11-16
 Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
 
-- Branch: `main`; last code commit `10bf355` (2026-11-13). Use `git status`
-  and `git log` for the authoritative current state.
+- Branch: `main`; last commit `0969e4f` (2026-11-13). The 2026-11-16 changes are
+  uncommitted in the working tree.
 - Active task: none.
-- Last code change: 2026-11-13 behavior convergence — cd-style `j`/`J`/`o`
-  pre-branches, missing-match errors, Bash prompt change detection, and the
-  unified `file` decay constant.
-- Handoff docs: 2026-11-13 added tracked `STATE.md`, `TASKS.md`, and
-  `ACCEPTANCE.md`; `AGENTS.md` now defines the read order, update protocol, and
-  common commands.
-- Next action: none queued; see [`TASKS.md`](TASKS.md).
+- Last code change: added Bash/fish `jc`/`je` helpers and NORMAL-mode fzf
+  `c`/`v`/`e` (exit, no navigation) plus `C`/`V`/`E` (stay, tmux window when
+  available); removed the obsolete `C` cleanup binding.
+- Next action: no queued task; see [`TASKS.md`](TASKS.md) for remaining manual
+  host and interactive checks. The 2026-11-16 working tree has been committed
+  and pushed in this session.
 - Blockers: none.
 
 ## What was verified
@@ -27,25 +26,47 @@ change; record the actual commands and results here.
 | Syntax | `bash -n` on `scripts/frecency`, `scripts/frecency-test`, `scripts/bmark.sh`, `shell/frecency.bash`, `install.sh` | pass |
 | Syntax | `fish -n shell/frecency.fish` | pass |
 | Whitespace | `git diff --check` | pass |
-| Bash hook | first prompt records once; repeat prompt does not record; directory change records; `/tmp` subdirectory skipped; returning from it records | pass |
-| Bash jumps | `j -`, existing directory, `J`/`o` existing file, multi-word query, no-match non-zero exit | pass |
-| Fish jumps | same pre-branches and no-match status propagation | pass |
-| CLI | `file`/`file_dir`/`file_file` no-match exits 1 with stderr; vifm variant exits 0 silently | pass |
-| Scoring | unified `file` `LAMBDA=0.005`, split tables `0.01`, config override, typed topics | pass |
-| Installer | `--dry-run --register`, `--dry-run --uninstall`; disposable-`HOME` `--register` install, self-check, and `file` database init | pass |
+| Capacity | disposable `HOME`, 1600 seeded rows: add reduced unbookmarked rows to 1351, protected the new entry, retained high scores | pass |
+| Capacity | per-table `MAX_ENTRIES_UNIFIED=100`, `MAX_ENTRIES_DIR=200`, `MAX_ENTRIES_FILE=300`: counts became `91|181|271`; bookmark retained | pass |
+| Capacity | `frecency file_dir cleanup` read `MAX_ENTRIES_DIR=10` from `file.config`; 50 rows became 9 | pass |
+| Capacity | `MAX_ENTRIES=0` disabled pruning; a legacy wall-clock age setting no longer deleted old `last_access` rows | pass |
+| Bash jumps | bare `j` → `$HOME`; existing directory wins over history; `j -`; `J`/`o` print paths without changing `$PWD`; `o` enters directories | pass |
+| Fish jumps | same checks via `fish --no-config` | pass |
+| CLI | `--emit=path` prints one path; vifm flavour prints `goto '...'`; no-match exits 1 with stderr | pass |
+| Picker flag | `jump-handler --picker no-such` with a stub fzf exits 0, confirming the argument is an initial query | pass |
+| fzf keys | `c`/`C`/`v`/`V`/`e`/`E` bind expressions parsed by fzf 0.72 in filter mode | pass |
+| fzf keys | `frecency file fzf-action copy/edit/view/view-stay` with stub `wl-copy`/`EDITOR`/`PAGER` and a path with spaces (copy verified byte-for-byte, no trailing newline) | pass |
+| fzf keys | pty keypresses on fzf 0.72: lowercase `c`/`v`/`e` copy/view/edit and abort with empty output and unchanged `$PWD`; uppercase `C`/`V`/`E` keep fzf open until `q` | pass (one machine, non-tmux) |
+| fzf keys | tmux 3.x `new-window` from `edit-stay`/`view-stay` inherits `EDITOR`/`PAGER`, creates a new window, and returns immediately | pass |
+| Shell helpers | `jc`/`je` in Bash and fish with stub `wl-copy`/`vim`: path copied without newline, `vim -- <path>` called, `$PWD` unchanged | pass |
+| Self-check | `HOME=<disposable> scripts/frecency-test` | pass; bundled 3.46.1 and system 3.45.1 |
+| Installer | `./install.sh --dry-run --register`, `./install.sh --dry-run --uninstall` | pass |
+| Interactive UI | `ji` picker keypresses on the maintainer's own terminal | not run (needs a terminal) |
 
 ## Recent changes
 
-- 2026-11-13: added tracked agent handoff docs (`STATE.md`, `TASKS.md`,
-  `ACCEPTANCE.md`) and updated `AGENTS.md` with the read order and update
-  protocol.
+- 2026-11-16: added Bash/fish `jc` (copy selected file path via `wl-copy`,
+  no trailing newline) and `je` (edit with `vim -- <path>`); `j`/`ji`/`J` now
+  return 0 on an empty fzf result so aborts stay silent.
+- 2026-11-16: fzf NORMAL-mode `c`/`v`/`e` execute and leave fzf without emitting
+  a path (`abort` / `become`); `C`/`V`/`E` execute and keep fzf open, using a
+  tmux new window when `$TMUX` is set. The old `C` cleanup binding was removed;
+  `Enter` is the only navigation exit. `x` remains the clear-query key.
+- 2026-11-16: capacity cleanup now runs after each write, using
+  `MAX_ENTRIES=1500` with per-table `MAX_ENTRIES_UNIFIED`/`_DIR`/`_FILE`
+  overrides in `file.config`; pruning keeps 90% of the limit and protects the
+  entry just written. Wall-clock age cleanup was removed.
+- 2026-11-16: bare `j` goes to `$HOME`, `ji` opens the directory picker with an
+  optional initial query, and `--emit=path` makes non-vifm file selection print
+  only the path. Bash and fish integrations were kept symmetric.
+- 2026-11-16: fzf NORMAL mode binds `v` (pager, `$PAGER` then `less -R`) and
+  `e` (`$EDITOR`, fallback `vi`) for `file`/`file_file` pickers.
+- 2026-11-16: README, `docs/REGRESSION.md`, and `docs/TASKS.md` were updated.
 - 2026-11-13: `052821f` Bash records directory history only when `$PWD`
   changes; `45410a9` adds cd-style `j`/`J`/`o` paths and missing-match errors;
   `10bf355` sets unified `file` decay to `0.005` with per-table defaults.
-  `README.md` and downstream documentation were updated.
 - 2026-11-11: `193250d` added routed directory/file history with unified and
   typed tables in `file.db`.
-- 2026-11-09: `f77aaae` added the quickstart and regression checklist.
 
 ## Handoff checklist
 
@@ -65,4 +86,7 @@ change; record the actual commands and results here.
 
 - Bash, fish, vifm, and Neovim host event behavior is not covered by automated
   end-to-end tests; see the "Not covered" section of `REGRESSION.md`.
+- `ji` and the NORMAL-mode `c`/`v`/`e` actions (and uppercase variants) still
+  need an interactive pass on the maintainer's own terminal/tmux setup; the
+  recorded pty checks were run on one machine only.
 - There is no supported CLI command to reset or list all entries for a topic.

@@ -57,11 +57,15 @@ already recorded in your `file` topic.
 # Bash or fish: directory-only jump
 $ j src parser
 
-# Bash or fish: file-only jump (copies the file path and enters its parent)
+# Bash or fish: file-only lookup (prints the selected path)
 $ J notes report
 
 # Bash or fish: unified directory/file history
+# Directories are entered; files only print their path.
 $ o notes
+
+# Bash or fish: interactive directory-history picker
+$ ji
 
 # Vifm: unified history is o; type-specific command-line commands preserve
 # vifm's built-in j movement key.
@@ -91,8 +95,8 @@ tables and event clocks. Recording differs by host:
 
 | Host | What records history | How it jumps or displays a `file` topic entry |
 |---|---|---|
-| Bash | `PROMPT_COMMAND` records changed directories; opening files through Bash is not automatically tracked. | `o` searches unified history; `j` jumps to a directory; `J` selects a file, copies its path when `wl-copy` or `xclip` is available, and enters its parent. `Alt-T` inserts a unified history path. |
-| Fish | `PWD` hook records changed directories; opening files through Fish is not automatically tracked. | `o`, `j`, and `J` provide the same unified, directory, and file behavior as Bash. `Alt-T` inserts a unified history path. |
+| Bash | `PROMPT_COMMAND` records changed directories; opening files through Bash is not automatically tracked. | `o` searches unified history; `j` jumps to a directory; `J` prints the selected file path; `jc`/`je` copy/edit it. `Alt-T` inserts a unified history path. |
+| Fish | `PWD` hook records changed directories; opening files through Fish is not automatically tracked. | `o`, `j`, `J`, `jc`, and `je` provide the same unified, directory, and file behavior as Bash. `Alt-T` inserts a unified history path. |
 | Vifm | `DirEnter` records directories; `l`/`Enter` records opened files; `M` records a keyword bookmark. | `o` opens unified history; `O` browses the current tree; `:j` and `:J` query directory and file history without overriding vifm's built-in `j` motion. |
 | Neovim | `BufReadPost` records file buffers and `BufNewFile` records new files; a recent exact-path Vifm record is deduplicated. | No jump command or picker is provided by this integration; it records to unified and file-specific history. |
 
@@ -222,7 +226,7 @@ In vifm (defined in `frecency.vifm`):
 | `o` | jump from history: type words to jump to the best match directly, empty input opens fzf |
 | `O` | browse the current directory tree with fzf (`--walker`), complements `o`'s global history |
 
-Inside the frecency fzf UI:
+Inside the frecency fzf UI (NORMAL mode; these keys only filter text in SEARCH mode):
 
 | key | action |
 |---|---|
@@ -230,13 +234,25 @@ Inside the frecency fzf UI:
 | `Esc` | SEARCH -> NORMAL, NORMAL -> quit |
 | `q` | quit (NORMAL mode) |
 | `j k h l g G` | Vim navigation (NORMAL mode) |
-| `c` / `x` | clear query and start searching |
+| `x` | clear query and start searching |
 | `d` | delete entry (trash table, undoable) |
 | `r` | remove keyword bookmark, keep path and EMS history |
 | `u` | undo last delete |
 | `s` | toggle ordered / any-order multi-word matching |
-| `C` | run cleanup now |
-| `Enter` | jump |
+| `c` / `C` | copy the selected path (no trailing newline); lowercase leaves fzf, uppercase stays |
+| `v` / `V` | view the selected file (`$PAGER`, fallback `less -R`) or list a directory (`eza`/`ls`); lowercase leaves fzf, uppercase stays |
+| `e` / `E` | edit with `$EDITOR` (fallback `vi`); lowercase leaves fzf, uppercase stays |
+| `Enter` | jump (the only key that emits a path and can change the shell's directory) |
+
+Lowercase `c`/`v`/`e` execute the action and then exit fzf **without emitting a
+path**, so the shell wrapper cannot `cd`. Uppercase `C`/`V`/`E` run the action
+and keep fzf open: inside tmux they open a new window and return immediately,
+otherwise fzf is suspended until the program exits. `Enter` remains the only
+navigation exit.
+
+Capacity cleanup is automatic after every write, so the old NORMAL-mode `C`
+cleanup binding was removed; `frecency <topic> cleanup` is still available
+manually.
 
 ### Key conflicts
 
@@ -254,11 +270,17 @@ user mappings (it cannot see vifm defaults, other sourced files or runtime
 
 Both integrations are installed by `install.sh` and provide:
 
-- `o` — jump from unified directory/file history
-- `j` — jump to the best matching directory-history entry; `j -` behaves like
-  `cd -`
-- `J` — select a file-history entry, copy its path when a clipboard tool is
-  available, and enter its parent directory
+- `o` — jump from unified directory/file history; directories are entered,
+  files print their path
+- `j` — jump to the best matching directory-history entry; bare `j` goes to
+  `$HOME`, and `j -` behaves like `cd -`
+- `ji` — open the interactive directory-history picker; an optional argument
+  becomes the initial fzf query
+- `J` — select a file-history entry and print its path; it does not change
+  directory or copy to the clipboard
+- `jc` — select a file path and copy it to the clipboard with `wl-copy`, no
+  trailing newline
+- `je` — select a file path and open it with `vim -- <path>`
 - `j`, `J`, and `o` also accept an existing path (a directory for `j`, a file
   for `J`, either for `o`) and act on it directly, before consulting history.
   Existing paths win over history matches; multi-word arguments are always
@@ -273,13 +295,17 @@ In the shell, `o` searches unified history while `j` and `J` query
 type-specific history. They only need `frecency` on `PATH` — the `~/.local/bin` symlink created by
 `--register` / `--bin-link` covers this.
 
+`Enter` in the picker is the only navigation exit; the fzf `c`/`e`/`v` actions
+(and their uppercase variants) and the shell `jc`/`je` helpers are auxiliary
+actions and never change the current working directory.
+
 With a single argument, `j` first checks `-` and an existing directory, and
-`J`/`o` first check for an existing file (or directory, for `o`). Bare `j`,
-`J`, and `o` still open the fzf picker. A non-empty query that matches nothing
-prints `frecency: no history match for: <query>` to stderr and exits non-zero,
-so `alias cd=j` covers ordinary `cd <dir>` navigation. The alias also makes
-bare `cd` open the picker; use `command cd` when you want the shell's built-in
-behavior, such as going home with no argument.
+`J`/`o` first check for an existing file (or directory, for `o`). Bare `J` and
+`o` still open the fzf picker; bare `j` goes home and `ji` opens the directory
+picker. A non-empty query that matches nothing prints
+`frecency: no history match for: <query>` to stderr and exits non-zero,
+so `alias cd=j` covers ordinary `cd <dir>` navigation, `cd -`, and bare `cd`
+to `$HOME`.
 
 Load manually if needed:
 
@@ -321,8 +347,10 @@ GRADE_MODE=on             # rank by match quality (keyword/last-segment grades)
 MULTIWORD_MODE=ordered    # ordered (foo bar matches foo*bar) or any-order
 LAMBDA=0.01               # decay per navigation event; the unified `file`
                           # history defaults to 0.005
-MAX_ENTRIES=10000         # cleanup threshold
-MAX_DAYS=300              # entries untouched for this long are cleaned up
+MAX_ENTRIES=1500          # fallback capacity for each history table
+MAX_ENTRIES_UNIFIED=      # per-table override for the `entries` table
+MAX_ENTRIES_DIR=          # per-table override for `dir_entries`
+MAX_ENTRIES_FILE=         # per-table override for `file_entries`
 MAX_PATH_CHARS=60         # weighted display width before list paths abbreviate
 START_MODE=search         # 'search' starts with prompt ready, 'normal' with Vim keys
 START_DATA=all            # 'all' loads everything, 'last' only the LAST_LIMIT recent entries
@@ -336,6 +364,13 @@ The unified `file` history defaults to `LAMBDA=0.005` because its clock also
 counts file events; `file_dir`, `file_file`, and other topics default to
 `0.01`. A `LAMBDA` set in a topic config overrides the default for every
 destination that topic writes.
+
+Capacity is checked after every write. Each table keeps at most its configured
+limit of unbookmarked entries; when the limit is exceeded, the lowest-scoring
+entries are removed down to 90% of the limit. Bookmarked entries are never
+counted or removed. The three tables share `file.db`, so put the per-table
+limits in `~/.local/share/frecency/file.config`; empty values fall back to
+`MAX_ENTRIES`. Set a limit to `0` to disable automatic pruning for that table.
 
 Legacy entries remain in unified `entries` after upgrade. Split histories start
 accumulating when those directories and files are next visited or opened; the
@@ -385,8 +420,8 @@ program.
 
 Use `frecency file query` to inspect and search the `file` history. Replace
 `file` with another topic name for that topic. `frecency <topic> cleanup` prunes
-old unbookmarked entries using that topic's `MAX_DAYS` and `MAX_ENTRIES`
-settings; bookmarked entries are retained. Individual entries can be deleted
+unbookmarked entries above that topic's capacity limit; bookmarked entries are
+retained. Individual entries can be deleted
 with `frecency <topic> remove <content>` or from the UI with undo available.
 There is currently no supported command to reset or list all entries for a
 topic in the CLI. Do not delete a database file as a reset shortcut; that can
@@ -408,11 +443,13 @@ frecency <topic> add [--route unified[,dir][,file]] <content> [keyword]
                                              # write to selected history destinations
 frecency <topic> unbook <content>           # drop keyword, keep EMS history
 frecency <topic> query [term]               # open the fzf UI
-frecency <topic> jump-handler [term]        # best match / fzf picker -> cd command
+frecency <topic> jump-handler [--picker] [--emit=path] [term]
+                                             # best match / picker -> shell command
+                                             # --emit=path prints only the path
 frecency <topic> jump-handler-vifm [term]   # same, vifm flavour (goto)
 frecency <topic> remove <content>           # delete (undoable in the UI)
 frecency <topic> recent <seconds> [content] # exit 0 if content (or anything) changed recently
-frecency <topic> cleanup                    # prune by MAX_ENTRIES / MAX_DAYS
+frecency <topic> cleanup                    # prune above the capacity limit
 ```
 
 For the shared `file.db`, logical topics `file`, `file_dir`, and `file_file`

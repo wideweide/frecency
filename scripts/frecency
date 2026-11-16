@@ -39,7 +39,9 @@
 #    frecency file_file <action>               : file-only history in file.db
 #    frecency <topic> unbook <content>         : remove bookmark, keep EMS history
 #    frecency <topic> query [search_term]      : open the fzf UI
-#    frecency <topic> jump-handler [term]      : shell / vifm integration
+#    frecency <topic> fzf-action <mode> <path>  : NORMAL-mode copy/edit/view helper
+#    frecency <topic> jump-handler [--picker] [--emit=path] [term]
+#                                              : shell / vifm integration
 #    frecency <topic> remove <content>         : delete an entry (undoable)
 #    frecency <topic> recent <seconds> [content]
 #                                              : exit 0 if the entry <content>
@@ -93,8 +95,11 @@ case "$(uname -m)" in
 esac
 
 # --- Default configuration (overridable by <topic>.config) ---
-MAX_ENTRIES=10000
-MAX_DAYS=300
+MAX_ENTRIES=            # fallback capacity; empty means 1500
+MAX_ENTRIES_UNIFIED=    # per-table override; empty falls back to MAX_ENTRIES
+MAX_ENTRIES_DIR=
+MAX_ENTRIES_FILE=
+_PRUNE_FILL_PERCENT=90  # prune down to this percentage of the limit
 SLEEP_DELAY=0.06    # reload debounce for sqlite mode; a query takes ~25ms, so 0.2 is pure lag
 START_DATA=all      # 'last' recent entries / 'all' everything
 START_MODE=search   # 'normal' (Vim keys) / 'search' (type directly)
@@ -332,6 +337,51 @@ run_sql() {
 # Safely wrap any string in single quotes (for generated cd / goto commands).
 shq() { local s=${1//\'/\'\\\'\'}; printf '%s' "$s"; }
 
+_is_uint() { [[ ${1:-} =~ ^[0-9]+$ ]]; }
+
+# The three file.db tables share file.config for their per-table limits. When a
+# split topic (file_dir/file_file) is invoked directly, pick up any limits from
+# file.config without changing the rest of that topic's configuration.
+_SHARED_LIMITS_LOADED=0
+_load_shared_file_limits() {
+    (( _SHARED_LIMITS_LOADED )) && return 0
+    [[ "$DB_PATH" == "$DATA_DIR/file.db" ]] || return 0
+    [[ "$CONFIG_PATH" == "$DATA_DIR/file.config" ]] && return 0
+    [[ -f "$DATA_DIR/file.config" ]] || return 0
+    _SHARED_LIMITS_LOADED=1
+    local vals base uni dir file
+    vals=$( ( source "$DATA_DIR/file.config" >/dev/null 2>&1
+              printf '%s\n%s\n%s\n%s\n' \
+                  "${MAX_ENTRIES-}" "${MAX_ENTRIES_UNIFIED-}" \
+                  "${MAX_ENTRIES_DIR-}" "${MAX_ENTRIES_FILE-}" ) 2>/dev/null ) || return 0
+    { IFS= read -r base; IFS= read -r uni; IFS= read -r dir; IFS= read -r file; } <<< "$vals"
+    [[ -n "${MAX_ENTRIES:-}" ]] || MAX_ENTRIES=$base
+    [[ -n "${MAX_ENTRIES_UNIFIED:-}" ]] || MAX_ENTRIES_UNIFIED=$uni
+    [[ -n "${MAX_ENTRIES_DIR:-}" ]] || MAX_ENTRIES_DIR=$dir
+    [[ -n "${MAX_ENTRIES_FILE:-}" ]] || MAX_ENTRIES_FILE=$file
+}
+
+# Capacity limit for a history destination. Empty per-table values fall back to
+# MAX_ENTRIES; 0 disables automatic pruning for that table.
+_limit_for_dest() {
+    _load_shared_file_limits
+    local base="${MAX_ENTRIES:-1500}"
+    _is_uint "$base" || base=1500
+    case "$1" in
+        unified) printf '%s' "${MAX_ENTRIES_UNIFIED:-$base}" ;;
+        dir)     printf '%s' "${MAX_ENTRIES_DIR:-$base}" ;;
+        file)    printf '%s' "${MAX_ENTRIES_FILE:-$base}" ;;
+    esac
+}
+
+_dest_for_current_table() {
+    case "$ENTRY_TABLE" in
+        dir_entries)  printf 'dir' ;;
+        file_entries) printf 'file' ;;
+        *)            printf 'unified' ;;
+    esac
+}
+
 _require_sqlite3() {
     if [[ ! -x "$SQLITE3" ]] && ! command -v "$SQLITE3" >/dev/null 2>&1; then
         printf 'frecency: no usable sqlite3 found (%s)\n' "$SQLITE3" >&2
@@ -524,20 +574,40 @@ _decay_expr() {
     printf 'score * exp(-%s * %s)' "$LAMBDA" "$dt"
 }
 
+# Delete the lowest-scoring unbookmarked rows above `keep`. `protect` is the
+# content just written, so a new entry is not immediately removed by its own
+# capacity check.
+_prune_table() {
+    local table="$1" tick_key="$2" lambda="$3" keep="$4" protect="${5:-}"
+    local protect_sql=""
+    [[ -n "$protect" ]] && protect_sql="AND content <> $(sql_lit "$protect")"
+    run_sql "
+DELETE FROM $table
+ WHERE keyword = ''
+   $protect_sql
+   AND content IN (SELECT content FROM $table
+                    WHERE keyword = ''
+                      $protect_sql
+                    ORDER BY score * exp(-$lambda * (
+                                 (SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key') - tick
+                             )) DESC,
+                             last_access DESC, content
+                    LIMIT -1 OFFSET $keep);" >/dev/null
+}
+
 do_cleanup() {
     _ensure_ready || return 1
+    local limit keep
+    limit=$(_limit_for_dest "$(_dest_for_current_table)")
+    if _is_uint "$limit" && (( limit > 0 )); then
+        keep=$(( limit * _PRUNE_FILL_PERCENT / 100 ))
+        (( keep >= 1 )) || keep=1
+        _prune_table "$ENTRY_TABLE" "$TICK_KEY" "$LAMBDA" "$keep" || return 1
+    fi
     run_sql "
-DELETE FROM $ENTRY_TABLE WHERE keyword = '' AND last_access < datetime('now', '-$MAX_DAYS days');
-DELETE FROM $ENTRY_TABLE
- WHERE keyword = ''
-   AND content IN (SELECT content FROM $ENTRY_TABLE
-                    WHERE keyword = ''
-                    ORDER BY $(_decay_expr) DESC, last_access DESC
-                    LIMIT -1 OFFSET $MAX_ENTRIES);
 DELETE FROM $TRASH_TABLE
  WHERE content NOT IN (SELECT content FROM $TRASH_TABLE
-                        ORDER BY deleted_at DESC LIMIT $UNDO_KEEP);
-" >/dev/null
+                        ORDER BY deleted_at DESC LIMIT $UNDO_KEEP);" >/dev/null
 }
 
 # ============================================================================
@@ -568,6 +638,7 @@ COMMIT;
 
 _do_upsert_route() {
     local content="$1" keyword="$2" route_sql="BEGIN IMMEDIATE;" dest table tick_key lambda
+    local -a dests=() tables=() ticks=() lambdas=()
     for dest in "${_route_targets[@]}"; do
         case "$dest" in
             unified) table=entries; tick_key=tick; lambda=$_LAMBDA_UNIFIED ;;
@@ -575,6 +646,7 @@ _do_upsert_route() {
             file) table=file_entries; tick_key=file_tick; lambda=$_LAMBDA_FILE ;;
             *) continue ;;
         esac
+        dests+=("$dest"); tables+=("$table"); ticks+=("$tick_key"); lambdas+=("$lambda")
         route_sql+="
 UPDATE meta SET v = CAST(CAST(v AS INTEGER) + 1 AS TEXT) WHERE k = '$tick_key';
 INSERT INTO $table (content, keyword, score, visits, tick, last_access)
@@ -585,10 +657,31 @@ ON CONFLICT(content) DO UPDATE SET
     score = score * exp(-$lambda * ((SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key') - tick)) + 1,
     visits = visits + 1,
     tick = (SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key'),
-    last_access = CURRENT_TIMESTAMP;"
+    last_access = CURRENT_TIMESTAMP;
+SELECT COUNT(*) FROM $table WHERE keyword = '';"
     done
     route_sql+=$'\nCOMMIT;'
-    run_sql "$route_sql" >/dev/null
+
+    # Counts are collected in the write transaction; pruning itself runs after
+    # the commit so the write lock is not held while sorting/deleting.
+    local out
+    out=$(run_sql "$route_sql") || return 1
+    local -a counts=()
+    mapfile -t counts <<< "$out"
+    local i limit n keep
+    for i in "${!dests[@]}"; do
+        limit=$(_limit_for_dest "${dests[$i]}")
+        if ! _is_uint "$limit" || (( limit <= 0 )); then
+            continue
+        fi
+        n=${counts[$i]:-}
+        _is_uint "$n" || continue
+        if (( n > limit )); then
+            keep=$(( limit * _PRUNE_FILL_PERCENT / 100 ))
+            (( keep >= 1 )) || keep=1
+            _prune_table "${tables[$i]}" "${ticks[$i]}" "${lambdas[$i]}" "$keep" "$content" || return 1
+        fi
+    done
 }
 
 do_add() {
@@ -637,7 +730,10 @@ do_add() {
     ((${#_route_targets[@]})) || return 0
     _do_upsert_route "$content" "$keyword" || return 1
 
-    # Probabilistic background maintenance (0.1%)
+    # Low-frequency background maintenance: trim the undo table and act as a
+    # safety net for capacity checks missed by concurrent writers.
+    # Probabilistic (0.1%); automatic capacity pruning itself runs above, after
+    # every write.
     if (( RANDOM % 1000 == 0 )); then
         for dest in "${_route_targets[@]}"; do
             case "$dest" in
@@ -1063,7 +1159,7 @@ do_query_ui() {
 
     local P_NORMAL="${C_GREEN}${C_BOLD}● NORMAL${C_NORMAL}${C_BOLD} > "
     local P_SEARCH="${C_BLUE}${C_BOLD}● SEARCH${C_NORMAL}${C_BOLD} > "
-    local FOOTER_HINTS="/Search  Esc Normal/Exit  d Del  r Unbook  u Undo  ↵ Accept"
+    local FOOTER_HINTS="/Search  Esc Normal/Exit  d Del  r Unbook  u Undo  c/C Copy  v/V View  e/E Edit  ↵ Accept"
     local FOOTER_STR="$FOOTER_HINTS"
     local SEARCH_ACTION=enable-search
     local -a FZF_VIEW_OPTS=(--with-nth=1)
@@ -1087,8 +1183,20 @@ do_query_ui() {
         [[ -n "$search_term" ]] && INITIAL_DATA=all
     fi
 
-    local CORE_KEYS=(q j k h l g G c C d r u x /)
+    local CORE_KEYS=(q j k h l g G c C v V e E d r u x /)
     [[ "$SEARCH_MODE" == "sqlite" ]] && CORE_KEYS+=(s)
+    # Lowercase actions finish and leave fzf without emitting a path, so the
+    # shell wrapper never navigates. Uppercase actions run and stay in fzf
+    # (tmux opens a new window and returns immediately). All of them use {2},
+    # the raw path field, and never change the caller's working directory.
+    local -a ACTION_KEY_BINDS=(
+        --bind "c:execute-silent($SELF \"$TOPIC\" fzf-action copy {2})+abort"
+        --bind "e:become($SELF \"$TOPIC\" fzf-action edit {2})"
+        --bind "v:become($SELF \"$TOPIC\" fzf-action view {2})"
+        --bind "C:execute-silent($SELF \"$TOPIC\" fzf-action copy {2})+change-footer(copied)"
+        --bind "E:execute($SELF \"$TOPIC\" fzf-action edit-stay {2})"
+        --bind "V:execute($SELF \"$TOPIC\" fzf-action view-stay {2})"
+    )
     local VIM_NAV=$(IFS=,; echo "${CORE_KEYS[*]}")
 
     local _mode_file=$(mktemp "${TMPDIR:-/tmp}/frecency_mode.XXXXXX")
@@ -1131,7 +1239,7 @@ if [[ "$search_mode" == sqlite && ${#words[@]} -ge 2 ]]; then
         printf '%s' 'change-footer(ORDERED · NORMAL s→ANY ORDER)'
     fi
 else
-    printf '%s' 'change-footer(/Search  Esc Normal/Exit  d Del  r Unbook  u Undo  ↵ Accept)'
+    printf '%s' 'change-footer(/Search  Esc Normal/Exit  d Del  r Unbook  u Undo  c/C Copy  v/V View  e/E Edit  ↵ Accept)'
 fi
 FOOTER_SCRIPT
     chmod +x "$_order_toggle" "$_footer_handler"
@@ -1167,14 +1275,13 @@ FOOTER_SCRIPT
             --preview-window=right:50% --border=rounded --inline-info \
             --delimiter="$SEP" --accept-nth='2' "${FZF_VIEW_OPTS[@]}" --literal --exact \
             --bind "$START_BIND" --bind "change:$CHANGE_BIND" --bind "/:$SEARCH_BIND" \
-            --bind "c:clear-query+$SEARCH_ACTION+unbind($VIM_NAV)+change-prompt($P_SEARCH)+$SET_SEARCH" \
             --bind "x:$SEARCH_ACTION+clear-query+$SET_SEARCH" \
             --bind "esc:transform:$_esc_handler" \
             --bind "j:down,k:up,h:backward-char,l:forward-char,g:first,G:last,q:abort" \
             --bind "d:execute-silent($SELF \"$TOPIC\" internal-op del {})+$RELOAD_AND_FILTER" \
             --bind "r:execute-silent($SELF \"$TOPIC\" internal-op unbook {})+$RELOAD_AND_FILTER" \
             --bind "u:execute-silent($SELF \"$TOPIC\" internal-op undo)+$RELOAD_AND_FILTER" \
-            --bind "C:execute-silent($SELF \"$TOPIC\" cleanup)+$RELOAD_AND_FILTER" \
+            "${ACTION_KEY_BINDS[@]}" \
             "${ORDER_MODE_BIND[@]}" \
             --preview "$SELF \"$TOPIC\" preview {}"
 }
@@ -1182,9 +1289,65 @@ FOOTER_SCRIPT
 # ============================================================================
 # Jump / output for the caller to execute
 # ============================================================================
+# NORMAL-mode helpers driven by fzf key binds. `copy` puts the raw path on the
+# clipboard without a trailing newline; `edit`/`view` run in the foreground so
+# they can be used with `become` (fzf replaced, no path emitted, no cd). The
+# `-stay` variants are used with fzf `execute`: inside tmux they open a new
+# window and return immediately, otherwise they run in the foreground and fzf
+# redraws when the program exits. Every variant leaves the shell's PWD alone.
+do_fzf_action() {
+    local mode="$1" path="$2" foreground cmd
+    case "$mode" in
+        copy)
+            if command -v wl-copy >/dev/null 2>&1; then
+                printf '%s' "$path" | wl-copy
+            elif command -v xclip >/dev/null 2>&1; then
+                printf '%s' "$path" | xclip -selection clipboard
+            fi
+            return 0
+            ;;
+        edit|view)
+            foreground=$mode
+            ;;
+        edit-stay|view-stay)
+            foreground=${mode%-stay}
+            if [[ -n "$TMUX" ]]; then
+                tmux new-window "EDITOR=$(printf '%q' "${EDITOR:-vi}") PAGER=$(printf '%q' "${PAGER:-less -R}") $(printf '%q' "$SELF") $(printf '%q' "$TOPIC") fzf-action $(printf '%q' "$foreground") $(printf '%q' "$path")" >/dev/null 2>&1
+                return 0
+            fi
+            ;;
+        *) return 2 ;;
+    esac
+    if [[ "$foreground" == "edit" ]]; then
+        cmd="${EDITOR:-vi}"
+    elif [[ -d "$path" ]]; then
+        cmd="eza -la"
+        command -v eza >/dev/null 2>&1 || cmd="ls -la"
+    else
+        cmd="${PAGER:-less -R}"
+    fi
+    eval "$cmd $(printf '%q' "$path")"
+}
+
+# Backward-compatible name for external callers of the previous UI action.
+do_open_external() { do_fzf_action "$1" "$2"; }
+
 do_jump_handler() {
-    local term="$1" res
-    if [[ -n "$term" ]]; then
+    local picker=0 emit=shell term="" arg res
+    for arg in "$@"; do
+        case "$arg" in
+            --picker) picker=1 ;;
+            --emit=path) emit=path ;;
+            --emit=shell) emit=shell ;;
+            *) term+="${term:+ }$arg" ;;
+        esac
+    done
+
+    if (( picker )); then
+        # Interactive picker; an optional term becomes the initial fzf query.
+        res=$($SELF "$TOPIC" query "$term") || exit 0
+        [[ -z "$res" ]] && exit 0
+    elif [[ -n "$term" ]]; then
         # zoxide / ze semantics: with a query, skip fzf and take the best entry by
         # EMS + match grade (first internal-query row = highest grade, then highest
         # score_cur within that grade).
@@ -1208,6 +1371,23 @@ do_jump_handler() {
         [[ -z "$res" ]] && exit 0
     fi
     local raw_path="${res##*$SEP}"
+
+    if [[ "$emit" == "path" && "$ACTION" != *"vifm" ]]; then
+        case "$TOPIC" in
+            file_dir)
+                [[ -d "$raw_path" ]] || { printf 'frecency: directory path not on disk: %s\n' "$raw_path" >&2; exit 1; }
+                printf '%s\n' "$raw_path"; exit 0
+                ;;
+            file_file)
+                [[ -f "$raw_path" ]] || { printf 'frecency: file path not on disk: %s\n' "$raw_path" >&2; exit 1; }
+                printf '%s\n' "$raw_path"; exit 0
+                ;;
+            file)
+                [[ -e "$raw_path" ]] || { printf 'frecency: path not on disk: %s\n' "$raw_path" >&2; exit 1; }
+                printf '%s\n' "$raw_path"; exit 0
+                ;;
+        esac
+    fi
 
     if [[ "$TOPIC" == "cmd" ]]; then printf '%s\n' "$raw_path"; exit 0; fi
 
@@ -1286,6 +1466,11 @@ for _T in "${TOPICS[@]}"; do
     LAMBDA=$_lambda_default
 
     # Per-topic configuration overrides
+    MAX_ENTRIES=
+    MAX_ENTRIES_UNIFIED=
+    MAX_ENTRIES_DIR=
+    MAX_ENTRIES_FILE=
+    _SHARED_LIMITS_LOADED=0
     [[ -f "$CONFIG_PATH" ]] && source "$CONFIG_PATH"
 
     if [[ "$LAMBDA" == "$_lambda_default" ]]; then
@@ -1316,7 +1501,9 @@ for _T in "${TOPICS[@]}"; do
         recent)         do_recent "$1" "$2" ;;
         query)          do_query_ui "$1" ;;
         preview)        do_preview "$1" ;;
-        jump-handler*)  do_jump_handler "$*" ;;
+        fzf-action)     do_fzf_action "$1" "$2" ;;
+        open-external)  do_open_external "$1" "$2" ;;
+        jump-handler*)  do_jump_handler "$@" ;;
         internal-query) _do_internal_query "$1" "$2" ;;
         internal-op)    _do_internal_op "$1" "$2" ;;
         *)              printf 'Unknown action: %s\n' "$ACTION"; exit 1 ;;

@@ -11,12 +11,13 @@
 #
 # Provides:
 #   o / j / J     unified history / directory history / file history
+#   ji            interactive directory-history picker
+#   jc / je       copy a selected file path / edit it with vim
 #   Alt-T         pick a path from history and insert it at the command line
 #   PWD hook      record every directory change in the `file` topic
 
 # --- j / J: type-specific jumps ---
-# Copy a path to the clipboard (wl-copy first, xclip fallback), the same
-# behavior the jump handler and Alt-T use.
+# Copy a path to the clipboard (wl-copy first, xclip fallback), used by Alt-T.
 function __frecency_copy_path --description "copy a path to the clipboard"
     if command -qv wl-copy
         printf '%s' "$argv[1]" | wl-copy
@@ -25,16 +26,14 @@ function __frecency_copy_path --description "copy a path to the clipboard"
     end
 end
 
-# Enter an existing file's parent and copy its absolute path: the same
-# semantics as selecting a file history entry, for the cd-compat pre-branch.
-function __frecency_open_file --description "enter a file's parent and copy its path"
-    set -l target $argv[1]
-    if not cd (dirname $target)
-        return 1
+# Print an absolute path without changing directory or touching the clipboard.
+function __frecency_emit_path --description "print an absolute path"
+    set -l path $argv[1]
+    if not string match -q '/*' -- "$path"
+        set -l abs (readlink -f -- "$path" 2>/dev/null)
+        test -n "$abs"; and set path $abs
     end
-    set target $PWD/(basename $target)
-    __frecency_copy_path $target
-    printf 'Copied path: %s\n' $target
+    printf '%s\n' "$path"
 end
 
 # cd-compat pre-branch: with a single argument, `-` and existing paths are
@@ -48,19 +47,26 @@ function o --description "jump within unified frecency history"
             return
         end
         if test -f "$argv[1]"
-            __frecency_open_file "$argv[1]"
+            __frecency_emit_path "$argv[1]"
             return
         end
     end
-    set -l cmd (frecency file jump-handler "$argv")
+    set -l sel (frecency file jump-handler --emit=path $argv)
     set -l rc $status
     test $rc -eq 0; or return $rc
-    if test -n "$cmd"
-        eval $cmd
+    test -z "$sel"; and return 0
+    if test -d "$sel"
+        cd "$sel"
+    else
+        __frecency_emit_path "$sel"
     end
 end
 
 function j --description "z-like jump from frecency history"
+    if test (count $argv) -eq 0
+        cd "$HOME"
+        return
+    end
     if test (count $argv) -eq 1
         if test "$argv[1]" = "-"
             cd -
@@ -71,25 +77,51 @@ function j --description "z-like jump from frecency history"
             return
         end
     end
-    set -l cmd (frecency file_dir jump-handler "$argv")
+    set -l cmd (frecency file_dir jump-handler $argv)
     set -l rc $status
     test $rc -eq 0; or return $rc
-    if test -n "$cmd"
-        eval $cmd
-    end
+    # An fzf abort produces no output; return quietly instead of failing.
+    test -z "$cmd"; and return 0
+    eval $cmd
 end
 
-function J --description "jump within file history"
-    if test (count $argv) -eq 1; and test -f "$argv[1]"
-        __frecency_open_file "$argv[1]"
-        return
-    end
-    set -l cmd (frecency file_file jump-handler "$argv")
+function ji --description "open the directory history picker"
+    set -l cmd (frecency file_dir jump-handler --picker $argv)
     set -l rc $status
     test $rc -eq 0; or return $rc
-    if test -n "$cmd"
-        eval $cmd
+    test -z "$cmd"; and return 0
+    eval $cmd
+end
+
+function J --description "print a file path from frecency history"
+    if test (count $argv) -eq 1; and test -f "$argv[1]"
+        __frecency_emit_path "$argv[1]"
+        return
     end
+    set -l path (frecency file_file jump-handler --emit=path $argv)
+    set -l rc $status
+    test $rc -eq 0; or return $rc
+    test -z "$path"; and return 0
+    __frecency_emit_path "$path"
+end
+
+# Copy a selected file path to the clipboard (no trailing newline) or edit it
+# with vim. Both reuse J, so they inherit its query/abort behavior and never
+# change the working directory.
+function jc --description "copy a selected file path to the clipboard"
+    set -l f (J $argv)
+    set -l rc $status
+    test $rc -eq 0; or return $rc
+    test -n "$f"; or return 0
+    printf '%s' "$f" | wl-copy
+end
+
+function je --description "edit a selected file path with vim"
+    set -l f (J $argv)
+    set -l rc $status
+    test $rc -eq 0; or return $rc
+    test -n "$f"; or return 0
+    vim -- "$f"
 end
 
 # --- Pick a path from history into the command line ---

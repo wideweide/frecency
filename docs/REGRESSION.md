@@ -40,6 +40,64 @@ Run the search and curation examples in one shell session so they share
    `HOME="$test_home" scripts/frecency check query` and `parser-tag` no longer acts as its keyword
    match. The UI `r` action should have the same keep-history behavior.
 
+## Capacity cleanup
+
+Use a disposable home and seed more rows than the default limit.
+
+```bash
+test_home=$(mktemp -d)
+mkdir -p "$test_home/.local/share/frecency"
+printf '%s\n' 'IGNORE_PATTERNS=()' > "$test_home/.local/share/frecency/file.config"
+HOME="$test_home" scripts/frecency file init
+sqlite_bin=$(cat "$test_home/.local/share/frecency/.sqlite3.bin")
+"$sqlite_bin" "$test_home/.local/share/frecency/file.db" <<'SQL'
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 1600)
+INSERT INTO entries (content, keyword, score, visits, tick, last_access)
+SELECT '/seed/' || i, '', i, 1, i,
+       datetime('now', '-' || (2000 - i) || ' seconds') FROM n;
+UPDATE meta SET v = '1600' WHERE k = 'tick';
+SQL
+HOME="$test_home" scripts/frecency file add --route unified "$test_home/alpha"
+"$sqlite_bin" "$test_home/.local/share/frecency/file.db" \
+  "SELECT count(*) FROM entries WHERE keyword='';
+   SELECT count(*) FROM entries WHERE content='$test_home/alpha';
+   SELECT min(score), max(score) FROM entries WHERE keyword='';"
+```
+
+Expected: the unbookmarked count is about 1351 (1350 target plus the protected
+new entry), `alpha` is present, and the retained scores are the higher ones.
+Bookmarks are exempt from both the limit and deletion.
+
+To check independent per-table limits, put them in `file.config` and repeat:
+
+```bash
+cat > "$test_home/.local/share/frecency/file.config" <<'EOF'
+IGNORE_PATTERNS=()
+MAX_ENTRIES_UNIFIED=100
+MAX_ENTRIES_DIR=200
+MAX_ENTRIES_FILE=300
+EOF
+"$sqlite_bin" "$test_home/.local/share/frecency/file.db" <<'SQL'
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 400)
+INSERT INTO dir_entries SELECT '/d/'||i, '', i, 1, i, CURRENT_TIMESTAMP FROM n;
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 400)
+INSERT INTO file_entries SELECT '/f/'||i, '', i, 1, i, CURRENT_TIMESTAMP FROM n;
+INSERT INTO entries VALUES ('/bookmark/path', 'tag', 1.0, 1, 1601, CURRENT_TIMESTAMP);
+UPDATE meta SET v='400' WHERE k IN ('dir_tick', 'file_tick');
+SQL
+HOME="$test_home" scripts/frecency file add --route unified,dir,file "$test_home/beta"
+"$sqlite_bin" "$test_home/.local/share/frecency/file.db" \
+  "SELECT (SELECT count(*) FROM entries WHERE keyword=''),
+          (SELECT count(*) FROM dir_entries WHERE keyword=''),
+          (SELECT count(*) FROM file_entries WHERE keyword=''),
+          (SELECT count(*) FROM entries WHERE content='/bookmark/path');"
+```
+
+Expected: each non-empty table is at or below its configured limit after
+pruning (with the seeded rows above, the counts should be `91|181|271|1`:
+entries, directories, files, and the surviving bookmark), and the newly written
+entry survives. `MAX_ENTRIES=0` disables automatic pruning for that table.
+
 ## UI curation and missing paths
 
 1. In the temporary topic UI, press `/`, search for the seeded path, press `d`,
@@ -59,8 +117,125 @@ Run the search and curation examples in one shell session so they share
 
    Expected: preview identifies the missing path and offers the `d` cleanup
    action. Delete the row with `d`; the record should no longer appear. The
-   `C` key runs age/count cleanup and does not specifically remove missing
-   paths, so do not treat it as the missing-path cleanup action.
+   `c`/`C` keys copy the selected path and do not remove missing paths; capacity
+   cleanup is automatic after writes and can also be run with
+   `frecency <topic> cleanup`.
+
+## Shell navigation (Bash and fish)
+
+Use a disposable home. The existing path must win over a history entry with the
+same name.
+
+1. Prepare paths and history:
+
+   ```bash
+   test_home=$(mktemp -d)
+   mkdir -p "$test_home/live" "$test_home/hist/deep/live"
+   mkdir -p "$test_home/.local/share/frecency"
+   printf '%s\n' 'IGNORE_PATTERNS=()' > "$test_home/.local/share/frecency/file.config"
+   HOME="$test_home" scripts/frecency file add --route unified,dir "$test_home/hist/deep/live"
+   ```
+
+2. Bash: an existing directory wins over history:
+
+   ```bash
+   HOME="$test_home" bash --noprofile --norc -c '
+     source "$1/shell/frecency.bash"
+     cd "$HOME"
+     j live
+     test "$PWD" = "$HOME/live" && echo PASS
+   ' _ "$PWD"
+   ```
+
+   Expected: `PASS`; `j live` must not jump to `hist/deep/live`.
+
+3. Bash: bare `j` goes to `$HOME`, and `j -` behaves like `cd -`:
+
+   ```bash
+   HOME="$test_home" bash --noprofile --norc -c '
+     source "$1/shell/frecency.bash"
+     cd /
+     j
+     test "$PWD" = "$HOME" && echo HOME_PASS
+     cd "$HOME/live"
+     j -
+     test "$PWD" = "$HOME" && echo DASH_PASS
+   ' _ "$PWD"
+   ```
+
+4. Bash: multi-word queries stay history lookups, and no match exits non-zero:
+
+   ```bash
+   HOME="$test_home" scripts/frecency file_dir jump-handler deep live
+   HOME="$test_home" scripts/frecency file_dir jump-handler definitely-no-such-entry
+   test $? -ne 0 && echo NO_MATCH_PASS
+   ```
+
+5. Bash: file selection prints only the path and keeps `$PWD`:
+
+   ```bash
+   touch "$test_home/a.txt"
+   HOME="$test_home" bash --noprofile --norc -c '
+     source "$1/shell/frecency.bash"
+     cd "$HOME"
+     before=$PWD
+     out=$(J "$HOME/a.txt")
+     test "$out" = "$HOME/a.txt" && echo PATH_PASS
+     test "$PWD" = "$before" && echo PWD_PASS
+     out=$(o "$HOME/a.txt")
+     test "$out" = "$HOME/a.txt" && echo O_FILE_PASS
+     o "$HOME/live"
+     test "$PWD" = "$HOME/live" && echo O_DIR_PASS
+   ' _ "$PWD"
+   ```
+
+6. Bash: `jc` copies a selected file path without a newline and `je` opens it
+   with vim; neither changes `$PWD`. Use stubs on `PATH` for the side effects:
+
+   ```bash
+   mkdir -p "$test_home/bin"
+   printf '#!/bin/sh\ncat > "$HOME/clipboard"\n' > "$test_home/bin/wl-copy"
+   printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "$HOME/vim_args"\n' > "$test_home/bin/vim"
+   chmod +x "$test_home/bin/wl-copy" "$test_home/bin/vim"
+   HOME="$test_home" PATH="$test_home/bin:$PATH" bash --noprofile --norc -c '
+     source "$1/shell/frecency.bash"
+     cd /
+     before=$PWD
+     jc a.txt
+     test "$(cat "$HOME/clipboard")" = "$HOME/a.txt" && echo JC_PASS
+     test "$PWD" = "$before" && echo JC_PWD_PASS
+     je a.txt
+     grep -q -- "-- $HOME/a.txt" "$HOME/vim_args" && echo JE_PASS
+     test "$PWD" = "$before" && echo JE_PWD_PASS
+   ' _ "$PWD"
+   ```
+
+   Expected: all four checks pass. The clipboard file contains the raw path
+   with no trailing newline (`wc -c` matches the path length).
+
+7. Fish: repeat steps 2–6 with `fish --no-config` and the fish integration.
+
+8. Manual: `ji` opens the picker; an argument becomes the initial query;
+   `Esc` returns to NORMAL.
+
+## fzf action keys (NORMAL mode)
+
+Use a disposable `HOME` with `START_MODE=normal` in both `file.config` and
+`file_file.config`, and stubs for `wl-copy`, `$EDITOR`, and `$PAGER`. Open a
+picker and check:
+
+1. `Enter` is the only key that emits a path. `c`, `C`, `v`, `V`, `e`, and `E`
+   must never print a path or change the shell's `$PWD`.
+2. `c` copies the raw selected path to the clipboard (no trailing newline) and
+   exits fzf with no output. `C` copies the same path but fzf stays open; in
+   tmux it opens a new window and returns immediately.
+3. `v`/`e` run the viewer (`$PAGER`, fallback `less -R`, or `eza`/`ls` for a
+   directory) and editor (`$EDITOR`, fallback `vi`) via `become`: fzf is
+   replaced, no path is emitted. `V`/`E` run the same programs while fzf stays
+   open (tmux window in tmux, suspend/resume otherwise).
+4. In SEARCH mode the same characters only filter text and must not trigger
+   any of the actions.
+
 
 ## Installer behavior
 
@@ -165,5 +340,8 @@ later checks. UI and host integration behavior still requires manual testing.
 - Automated end-to-end checks for Bash, fish, Vifm, and Neovim host event
   behavior are not currently provided; those integrations need manual host
   testing.
+- The interactive `ji` picker and NORMAL-mode `c`/`v`/`e` actions (and their
+  uppercase variants) need a real terminal and are not exercised by the
+  automated capacity/CLI commands.
 - There is no supported command to reset a topic database or list its entries
   without the interactive query UI.
