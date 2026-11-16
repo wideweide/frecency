@@ -224,25 +224,29 @@ Use a disposable `HOME` with `START_MODE=normal` in both `file.config` and
 `file_file.config`, and stubs for `wl-copy`, `$EDITOR`, and the viewer. Open a
 picker and check:
 
-1. `Enter` is the only key that emits a path. `c`, `C`, `v`, `V`, `e`, and `E`
-   must never print a path or change the shell's `$PWD`.
+1. `Enter` is the only key that emits a path. `c`, `v`, and `e` must never
+   print a path or change the shell's `$PWD`.
 2. `c` copies the raw selected path to the clipboard (no trailing newline) and
-   exits fzf with no output. `C` copies the same path but fzf stays open with a
-   `copied` footer.
-3. `v`/`e` run the viewer and editor under fzf `execute`: the picker is
-   suspended so the program owns the terminal and renders its content (verify
-   the file text appears on screen, not hidden behind fzf). On exit, lowercase
-   `v`/`e` leave fzf with no output and unchanged `$PWD`.
-4. The viewer command for `v`/`V` is `FRECENCY_VIEWER` if set and its binary
-   exists, otherwise `view`, then `$PAGER`, then `less -R`, then `cat`;
-   directories use `eza -la` / `ls -la`. `view` is preferred for syntax
-   highlighting. Confirm the chain with stubs on an isolated `PATH`.
-5. Uppercase `V`/`E`: inside tmux they open a new window (`tmux new-window`)
-   running the program and fzf resumes immediately; without tmux the program
-   runs in the current terminal and fzf **resumes after the program exits**,
-   ready for another selection (the picker must not cover the running program).
-6. In SEARCH mode the same characters only filter text and must not trigger
-   any of the actions.
+   fzf **stays open**. The footer shows `copied <path>`; switching entries and
+   copying again updates the footer, so each copy is unambiguous. Verify with a
+   path containing `)`, `,`, `+`, and backslashes — the footer must show the
+   verbatim path.
+3. `v` runs the viewer under fzf `execute`: the picker is suspended so the
+   program owns the terminal/popup and renders its content (verify the file
+   text appears on screen). On viewer exit fzf resumes **untouched** — same
+   query, list, and scroll position — for another selection. A directory opens
+   in `view`'s netrw browser (or `eza -la` / `ls -la` fallback).
+4. The viewer command for `v` is `FRECENCY_VIEWER` if set and its binary
+   exists, otherwise `view`, then `$PAGER`, then `less -R`, then `cat`. `view`
+   is preferred for syntax highlighting. Confirm the chain with stubs on an
+   isolated `PATH`.
+5. `e` runs `$EDITOR` and then aborts fzf **without emitting a path**: inside
+   tmux it opens a new fullscreen window (a tmux popup would cover it); without
+   tmux it runs in the current terminal. In both cases `:q` returns to the
+   shell, not to fzf.
+6. `C`, `V`, and `E` are no longer bound and must do nothing.
+7. In SEARCH mode the characters `c`, `v`, `e` only filter text and must not
+   trigger any of the actions.
 
 
 ## Installer behavior

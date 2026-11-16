@@ -36,12 +36,12 @@ change; record the actual commands and results here.
 | Fish jumps | same checks via `fish --no-config` | pass |
 | CLI | `--emit=path` prints one path; vifm flavour prints `goto '...'`; no-match exits 1 with stderr | pass |
 | Picker flag | `jump-handler --picker no-such` with a stub fzf exits 0, confirming the argument is an initial query | pass |
-| fzf keys | `c`/`C`/`v`/`V`/`e`/`E` bind expressions parsed by fzf 0.72 in filter mode | pass |
-| fzf keys | `frecency file fzf-action copy/edit/view/view-stay` with stub `wl-copy`/`EDITOR`/`PAGER` and a path with spaces (copy verified byte-for-byte, no trailing newline) | pass |
-| fzf keys | pty keypresses on fzf 0.72: lowercase `c`/`v`/`e` copy/view/edit, program content visible on the terminal, then abort with empty output and unchanged `$PWD`; uppercase `C` stays with `copied` footer | pass (one machine, non-tmux) |
-| fzf keys | pty: non-tmux uppercase `V`/`E` show program content, then fzf resumes after the program exits (no `abort`, no path emitted) | pass (one machine) |
-| fzf keys | viewer chain: `view` preferred (stub), `FRECENCY_VIEWER='less -R'` override honored | pass |
-| fzf keys | tmux 3.x `new-window` from `edit-stay`/`view-stay` inherits `EDITOR`/`FRECENCY_VIEWER`, creates a new window, and returns immediately | pass |
+| fzf keys | `c`/`v`/`e` bind expressions parsed by fzf 0.72 in filter mode | pass |
+| fzf keys | `frecency file fzf-action copy/edit/view/edit-stay` with stub `wl-copy`/`EDITOR`/`PAGER` and a path with spaces (copy verified byte-for-byte, no trailing newline) | pass |
+| fzf keys | pty: `c` copies the path, fzf stays open, footer shows `copied <path>` including verbatim special characters (`)`, `,`, `+`, backslash); `q` then exits with no path emitted | pass (one machine, non-tmux) |
+| fzf keys | pty: `v` shows program content then fzf resumes with query/list/scroll intact; `e` shows content then aborts with empty output and unchanged `$PWD` | pass (one machine, non-tmux) |
+| fzf keys | viewer chain: `view` preferred (stub), `FRECENCY_VIEWER='less -R'` override honored; directory opens in netrw via `view` | pass |
+| fzf keys | tmux 3.x `new-window` from `edit-stay` inherits `EDITOR`/`FRECENCY_VIEWER` and creates a new window | pass |
 | Shell helpers | `jc`/`je` in Bash and fish with stub `wl-copy`/`vim`: path copied without newline, `vim -- <path>` called, `$PWD` unchanged | pass |
 | Self-check | `HOME=<disposable> scripts/frecency-test` | pass; bundled 3.46.1 and system 3.45.1 |
 | Installer | `./install.sh --dry-run --register`, `./install.sh --dry-run --uninstall` | pass |
@@ -52,15 +52,16 @@ change; record the actual commands and results here.
 - 2026-11-16: added Bash/fish `jc` (copy selected file path via `wl-copy`,
   no trailing newline) and `je` (edit with `vim -- <path>`); `j`/`ji`/`J` now
   return 0 on an empty fzf result so aborts stay silent.
-- 2026-11-16: fzf NORMAL-mode `c`/`v`/`e` run via `execute` (fzf suspended so
-  the program owns the terminal and renders) then `abort` without emitting a
-  path — this fixed the earlier `become` bug where `v`/`e` were hidden behind
-  fzf or showed no content. `C` copies and stays. `V`/`E` open a tmux window
-  when `$TMUX` is set; without tmux they run in the current terminal and fzf
-  resumes after the program exits. The viewer now prefers `view` (syntax
-  highlighting), degrading through `FRECENCY_VIEWER`/`PAGER`/`less -R`/`cat`.
-  The old `C` cleanup binding was removed; `Enter` is the only navigation
-  exit, and `x` remains the clear-query key.
+- 2026-11-16: fzf NORMAL-mode keys simplified to `c`/`v`/`e` only (uppercase
+  `C`/`V`/`E` unbound). `c` copies the path and stays, with a `copied <path>`
+  footer generated via a `transform` helper (fzf does not expand `{}` in
+  `change-footer`); the path is shown verbatim, including special characters.
+  `v` runs the viewer under `execute` and restores the picker untouched on exit
+  (files and directories via `view`/netrw) for walk-through browsing. `e` runs
+  the editor and aborts without emitting a path (new tmux window inside tmux,
+  current terminal otherwise). The viewer prefers `view` (syntax highlighting),
+  degrading through `FRECENCY_VIEWER`/`PAGER`/`less -R`/`cat`. Capacity cleanup
+  is automatic; `Enter` is the only navigation exit and `x` clears the query.
 - 2026-11-16: capacity cleanup now runs after each write, using
   `MAX_ENTRIES=1500` with per-table `MAX_ENTRIES_UNIFIED`/`_DIR`/`_FILE`
   overrides in `file.config`; pruning keeps 90% of the limit and protects the

@@ -1183,33 +1183,8 @@ do_query_ui() {
         [[ -n "$search_term" ]] && INITIAL_DATA=all
     fi
 
-    local CORE_KEYS=(q j k h l g G c C v V e E d r u x /)
+    local CORE_KEYS=(q j k h l g G c v e d r u x /)
     [[ "$SEARCH_MODE" == "sqlite" ]] && CORE_KEYS+=(s)
-    # All action keys use {2}, the raw path field, and never change the caller's
-    # PWD or emit a path. Every action runs with fzf's `execute`, which suspends
-    # fzf and gives the terminal to the program; the program therefore renders
-    # in the foreground instead of being hidden behind the picker. Lowercase
-    # actions then `abort`, so fzf exits without emitting a path. Uppercase
-    # actions open a tmux window when available (fzf resumes immediately); with
-    # no tmux they stay in the current terminal and fzf resumes when the program
-    # exits, so the picker is available again for another selection.
-    local -a ACTION_KEY_BINDS=(
-        --bind "c:execute-silent($SELF \"$TOPIC\" fzf-action copy {2})+abort"
-        --bind "v:execute($SELF \"$TOPIC\" fzf-action view {2})+abort"
-        --bind "e:execute($SELF \"$TOPIC\" fzf-action edit {2})+abort"
-        --bind "C:execute-silent($SELF \"$TOPIC\" fzf-action copy {2})+change-footer(copied)"
-    )
-    if [[ -n "$TMUX" ]]; then
-        ACTION_KEY_BINDS+=(
-            --bind "V:execute($SELF \"$TOPIC\" fzf-action view-stay {2})"
-            --bind "E:execute($SELF \"$TOPIC\" fzf-action edit-stay {2})"
-        )
-    else
-        ACTION_KEY_BINDS+=(
-            --bind "V:execute($SELF \"$TOPIC\" fzf-action view {2})"
-            --bind "E:execute($SELF \"$TOPIC\" fzf-action edit {2})"
-        )
-    fi
     local VIM_NAV=$(IFS=,; echo "${CORE_KEYS[*]}")
 
     local _mode_file=$(mktemp "${TMPDIR:-/tmp}/frecency_mode.XXXXXX")
@@ -1218,6 +1193,7 @@ do_query_ui() {
     local _esc_handler="${_mode_file}.sh"
     local _order_toggle="${_mode_file}.toggle"
     local _footer_handler="${_mode_file}.footer"
+    local _copy_footer="${_mode_file}.copyfooter"
     cat > "$_esc_handler" <<ESCSCRIPT
 #!/bin/bash
 if [ "\$(cat "$_mode_file")" = normal ]; then
@@ -1252,11 +1228,41 @@ if [[ "$search_mode" == sqlite && ${#words[@]} -ge 2 ]]; then
         printf '%s' 'change-footer(ORDERED · NORMAL s→ANY ORDER)'
     fi
 else
-    printf '%s' 'change-footer(/Search  Esc Normal/Exit  d Del  r Unbook  u Undo  c/C Copy  v/V View(view)  e/E Edit  ↵ Accept)'
+    printf '%s' 'change-footer(/Search  Esc Normal/Exit  d Del  r Unbook  u Undo  c Copy  v View  e Edit  ↵ Accept)'
 fi
 FOOTER_SCRIPT
-    chmod +x "$_order_toggle" "$_footer_handler"
-    trap "rm -f '$_mode_file' '$_esc_handler' '$_order_file' '$_order_toggle' '$_footer_handler'" RETURN
+    cat > "$_copy_footer" <<'COPYFOOTER'
+#!/bin/bash
+# fzf does not expand {} placeholders inside change-footer, so emit the action
+# from a transform script. The path is taken verbatim; the whole argument
+# inside change-footer(...) is parsed as one string by fzf.
+printf 'change-footer(copied %s)' "$1"
+COPYFOOTER
+    chmod +x "$_order_toggle" "$_footer_handler" "$_copy_footer"
+    trap "rm -f '$_mode_file' '$_esc_handler' '$_order_file' '$_order_toggle' '$_footer_handler' '$_copy_footer'" RETURN
+
+    # All action keys use {2}, the raw path field, and never change the caller's
+    # PWD or emit a path. `c` only copies the path and the picker stays (the
+    # footer confirms it with the copied path). `v` previews inside the picker
+    # under fzf `execute`: fzf is suspended, `view` (or a fallback) owns the
+    # popup/terminal, and the picker is restored untouched when the viewer
+    # exits — directories open in netrw through the same `view`. `e` edits and
+    # exits fzf without emitting a path: inside tmux the editor opens in a new
+    # fullscreen window and fzf aborts; without tmux the editor runs in the
+    # current terminal and fzf aborts when it finishes.
+    local -a ACTION_KEY_BINDS=(
+        --bind "c:execute-silent($SELF \"$TOPIC\" fzf-action copy {2})+transform:$_copy_footer {2}"
+        --bind "v:execute($SELF \"$TOPIC\" fzf-action view {2})"
+    )
+    if [[ -n "$TMUX" ]]; then
+        ACTION_KEY_BINDS+=(
+            --bind "e:execute($SELF \"$TOPIC\" fzf-action edit-stay {2})+abort"
+        )
+    else
+        ACTION_KEY_BINDS+=(
+            --bind "e:execute($SELF \"$TOPIC\" fzf-action edit {2})+abort"
+        )
+    fi
 
     local SET_SEARCH="execute-silent(echo search > '$_mode_file')"
     local SET_NORMAL="execute-silent(echo normal > '$_mode_file')"
@@ -1333,11 +1339,13 @@ _frecency_viewer_cmd() {
 }
 
 # NORMAL-mode helpers driven by fzf key binds. `copy` puts the raw path on the
-# clipboard without a trailing newline; `edit`/`view` run in the foreground
-# under fzf `execute`, which suspends fzf so the program owns the terminal and
-# renders normally. The `-stay` variants open a tmux window when available;
-# outside tmux they behave like the plain variants. Every variant leaves the
-# shell's PWD alone.
+# clipboard without a trailing newline. `edit`/`view` run in the foreground
+# under fzf `execute`, which suspends fzf so the program owns the popup or the
+# terminal and renders normally; the picker is restored untouched afterwards.
+# Directories open through `view` (netrw) with the same viewer chain. The
+# `edit-stay` variant opens the editor in a tmux window instead of inside the
+# popup, so `e` can hand over to a fullscreen editor and abort. Every variant
+# leaves the shell's PWD alone.
 do_fzf_action() {
     local mode="$1" path="$2" foreground cmd
     case "$mode" in
@@ -1349,23 +1357,26 @@ do_fzf_action() {
             fi
             return 0
             ;;
-        edit|view)
-            foreground=$mode
-            ;;
-        edit-stay|view-stay)
-            foreground=${mode%-stay}
+        edit-stay)
+            foreground=edit
             if [[ -n "$TMUX" ]]; then
                 tmux new-window "EDITOR=$(printf '%q' "${EDITOR:-vi}") PAGER=$(printf '%q' "${PAGER:-less -R}") FRECENCY_VIEWER=$(printf '%q' "${FRECENCY_VIEWER:-}") $(printf '%q' "$SELF") $(printf '%q' "$TOPIC") fzf-action $(printf '%q' "$foreground") $(printf '%q' "$path")" >/dev/null 2>&1
                 return 0
             fi
+            ;;
+        edit|view)
+            foreground=$mode
             ;;
         *) return 2 ;;
     esac
     if [[ "$foreground" == "edit" ]]; then
         cmd="${EDITOR:-vi}"
     elif [[ -d "$path" ]]; then
-        cmd="eza -la"
-        command -v eza >/dev/null 2>&1 || cmd="ls -la"
+        # `view` on a directory opens the netrw browser: interactive listing,
+        # enter subdirectories, `q` returns to the picker.
+        cmd="view"
+        command -v view >/dev/null 2>&1 || cmd="eza -la"
+        command -v view >/dev/null 2>&1 || command -v eza >/dev/null 2>&1 || cmd="ls -la"
     else
         cmd=$(_frecency_viewer_cmd)
     fi

@@ -242,18 +242,18 @@ Inside the frecency fzf UI (NORMAL mode; these keys only filter text in SEARCH m
 | `r` | remove keyword bookmark, keep path and EMS history |
 | `u` | undo last delete |
 | `s` | toggle ordered / any-order multi-word matching |
-| `c` / `C` | copy the selected path (no trailing newline); lowercase leaves fzf, uppercase stays |
-| `v` / `V` | view the selected file (`view` → `$PAGER` → `less -R` → `cat`, override with `FRECENCY_VIEWER`) or list a directory (`eza`/`ls`); lowercase leaves fzf, uppercase stays |
-| `e` / `E` | edit with `$EDITOR` (fallback `vi`); lowercase leaves fzf, uppercase stays |
+| `c` | copy the selected path (no trailing newline); footer shows `copied <path>` and fzf stays |
+| `v` | preview in the picker: `view` (syntax highlighting, netrw for directories) → `$PAGER` → `less -R` → `cat`, override with `FRECENCY_VIEWER`; `q` returns to fzf with the query and scroll position intact |
+| `e` | edit with `$EDITOR` (fallback `vi`) and exit fzf without emitting a path; inside tmux opens a new fullscreen window, otherwise runs in the current terminal |
 | `Enter` | jump (the only key that emits a path and can change the shell's directory) |
 
-Actions run through fzf `execute`, which suspends the picker and gives the
-terminal to the program, so `view`/`vim` render normally instead of being
-hidden behind fzf. Lowercase `c`/`v`/`e` then exit fzf **without emitting a
-path**, so the shell wrapper cannot `cd`. Uppercase `C`/`V`/`E` keep the picker
-available: inside tmux they open a new window and fzf resumes immediately;
-without tmux the program runs in the current terminal and fzf resumes when it
-exits, ready for another selection. `Enter` remains the only navigation exit.
+`c` and `v` use fzf `execute`/`execute-silent`, which suspends the picker so the
+program owns the tmux popup or terminal and renders normally. The copied-path
+footer makes repeated copies unambiguous when switching between entries. `v`
+restores the picker untouched on exit, so you can walk through filtered
+entries one by one. `e` runs the editor and then aborts fzf **without emitting
+a path**, so the shell wrapper never `cd`s. The uppercase `C`/`V`/`E` bindings
+were removed; `Enter` remains the only navigation exit.
 
 Capacity cleanup is automatic after every write, so the old NORMAL-mode `C`
 cleanup binding was removed; `frecency <topic> cleanup` is still available
@@ -301,8 +301,8 @@ type-specific history. They only need `frecency` on `PATH` — the `~/.local/bin
 `--register` / `--bin-link` covers this.
 
 `Enter` in the picker is the only navigation exit; the fzf `c`/`e`/`v` actions
-(and their uppercase variants) and the shell `jc`/`je` helpers are auxiliary
-actions and never change the current working directory.
+and the shell `jc`/`je` helpers are auxiliary actions and never change the
+current working directory.
 
 With a single argument, `j` first checks `-` and an existing directory, and
 `J`/`o` first check for an existing file (or directory, for `o`). Bare `J` and
