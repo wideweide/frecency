@@ -129,7 +129,10 @@ only ticks on real navigation events, not on wall time).
 - fzf >= 0.48 (`--accept-nth` / `change-footer` / `rebind`)
 - file (MIME detection for previews), flock (util-linux, migration locking)
 - gawk recommended (mawk counts CJK paths in bytes and abbreviates too early)
-- optional: eza / bat / highlight (nicer previews), wl-copy / xclip (clipboard)
+- optional: view / eza / bat / highlight (view is the default file viewer and
+  gives syntax highlighting; eza/bat/highlight improve previews), wl-copy /
+  xclip (clipboard). `FRECENCY_VIEWER` overrides the viewer command (default
+  chain: `view` → `$PAGER` → `less -R` → `cat`).
 
 ## Layout
 
@@ -240,15 +243,17 @@ Inside the frecency fzf UI (NORMAL mode; these keys only filter text in SEARCH m
 | `u` | undo last delete |
 | `s` | toggle ordered / any-order multi-word matching |
 | `c` / `C` | copy the selected path (no trailing newline); lowercase leaves fzf, uppercase stays |
-| `v` / `V` | view the selected file (`$PAGER`, fallback `less -R`) or list a directory (`eza`/`ls`); lowercase leaves fzf, uppercase stays |
+| `v` / `V` | view the selected file (`view` → `$PAGER` → `less -R` → `cat`, override with `FRECENCY_VIEWER`) or list a directory (`eza`/`ls`); lowercase leaves fzf, uppercase stays |
 | `e` / `E` | edit with `$EDITOR` (fallback `vi`); lowercase leaves fzf, uppercase stays |
 | `Enter` | jump (the only key that emits a path and can change the shell's directory) |
 
-Lowercase `c`/`v`/`e` execute the action and then exit fzf **without emitting a
-path**, so the shell wrapper cannot `cd`. Uppercase `C`/`V`/`E` run the action
-and keep fzf open: inside tmux they open a new window and return immediately,
-otherwise fzf is suspended until the program exits. `Enter` remains the only
-navigation exit.
+Actions run through fzf `execute`, which suspends the picker and gives the
+terminal to the program, so `view`/`vim` render normally instead of being
+hidden behind fzf. Lowercase `c`/`v`/`e` then exit fzf **without emitting a
+path**, so the shell wrapper cannot `cd`. Uppercase `C`/`V`/`E` keep the picker
+available: inside tmux they open a new window and fzf resumes immediately;
+without tmux the program runs in the current terminal and fzf resumes when it
+exits, ready for another selection. `Enter` remains the only navigation exit.
 
 Capacity cleanup is automatic after every write, so the old NORMAL-mode `C`
 cleanup binding was removed; `frecency <topic> cleanup` is still available

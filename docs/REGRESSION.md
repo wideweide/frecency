@@ -221,19 +221,27 @@ same name.
 ## fzf action keys (NORMAL mode)
 
 Use a disposable `HOME` with `START_MODE=normal` in both `file.config` and
-`file_file.config`, and stubs for `wl-copy`, `$EDITOR`, and `$PAGER`. Open a
+`file_file.config`, and stubs for `wl-copy`, `$EDITOR`, and the viewer. Open a
 picker and check:
 
 1. `Enter` is the only key that emits a path. `c`, `C`, `v`, `V`, `e`, and `E`
    must never print a path or change the shell's `$PWD`.
 2. `c` copies the raw selected path to the clipboard (no trailing newline) and
-   exits fzf with no output. `C` copies the same path but fzf stays open; in
-   tmux it opens a new window and returns immediately.
-3. `v`/`e` run the viewer (`$PAGER`, fallback `less -R`, or `eza`/`ls` for a
-   directory) and editor (`$EDITOR`, fallback `vi`) via `become`: fzf is
-   replaced, no path is emitted. `V`/`E` run the same programs while fzf stays
-   open (tmux window in tmux, suspend/resume otherwise).
-4. In SEARCH mode the same characters only filter text and must not trigger
+   exits fzf with no output. `C` copies the same path but fzf stays open with a
+   `copied` footer.
+3. `v`/`e` run the viewer and editor under fzf `execute`: the picker is
+   suspended so the program owns the terminal and renders its content (verify
+   the file text appears on screen, not hidden behind fzf). On exit, lowercase
+   `v`/`e` leave fzf with no output and unchanged `$PWD`.
+4. The viewer command for `v`/`V` is `FRECENCY_VIEWER` if set and its binary
+   exists, otherwise `view`, then `$PAGER`, then `less -R`, then `cat`;
+   directories use `eza -la` / `ls -la`. `view` is preferred for syntax
+   highlighting. Confirm the chain with stubs on an isolated `PATH`.
+5. Uppercase `V`/`E`: inside tmux they open a new window (`tmux new-window`)
+   running the program and fzf resumes immediately; without tmux the program
+   runs in the current terminal and fzf **resumes after the program exits**,
+   ready for another selection (the picker must not cover the running program).
+6. In SEARCH mode the same characters only filter text and must not trigger
    any of the actions.
 
 
