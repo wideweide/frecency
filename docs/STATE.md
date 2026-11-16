@@ -5,15 +5,17 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
 
-- Branch: `main`; last commit `0969e4f` (2026-11-13). The 2026-11-16 changes are
-  uncommitted in the working tree.
+- Branch: `main`; last code commit `bf8a86e` (2026-11-16), pushed to
+  `origin/main`. The untracked `2026-11-16/` review notes are intentionally not
+  committed.
 - Active task: none.
 - Last code change: added Bash/fish `jc`/`je` helpers and NORMAL-mode fzf
   `c`/`v`/`e` (exit, no navigation) plus `C`/`V`/`E` (stay, tmux window when
   available); removed the obsolete `C` cleanup binding.
 - Next action: no queued task; see [`TASKS.md`](TASKS.md) for remaining manual
-  host and interactive checks. The 2026-11-16 working tree has been committed
-  and pushed in this session.
+  host and interactive checks. Local runtime was refreshed with
+  `install.sh --register` and installed files match the source. DLT
+  `docs/frecency.md` was updated to match the current behavior.
 - Blockers: none.
 
 ## What was verified
