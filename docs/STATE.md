@@ -5,18 +5,20 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
 
-- Branch: `main`; last code commit `08f4778` (2026-11-16), pushed to
-  `origin/main`. The untracked `2026-11-16/` review notes are intentionally not
-  committed. DLT `docs/frecency.md` synced in `9be0ed7`.
-- Active task: none.
-- Last code change: fzf NORMAL-mode `v` now keeps a rounded tmux popup border
-  visible while the viewer runs, using fzf 0.58+ `border-native` with a
-  temporarily rounded `popup-border-lines` (restored on exit). Older fzf keeps
-  the self-drawn border; non-tmux is unchanged. README updated.
+- Branch: `main`; this fix is commit `ac930b9` (2026-11-17), not yet pushed.
+  Previous code commit `87682b1` is on `origin/main`. The
+  untracked `2026-11-16/` review notes are intentionally not committed. DLT
+  `docs/frecency.md` synced in `6f884b7` (local master, not yet pushed).
+- Active task: none (vifm space-path fix completed this session).
+- Last code change: `frecency.vifm` no longer double-quotes `%d`/`%f` in
+  `:!` commands. vifm already shell-escapes those macros; the quotes preserved
+  the backslash before spaces literally, so opening a file like `zz test.log`
+  with `l` recorded `/path/zz\ test.log`. `trackPath`, `trackFile` and
+  `removeRecord` changed; DLT `docs/frecency.md` synced. Local runtime
+  refreshed with `./install.sh --register`.
 - Next action: no queued task; see [`TASKS.md`](TASKS.md) for remaining manual
-  host and interactive checks. The local runtime was NOT refreshed after this
-  change; run `./install.sh --register` to pick it up. The tmux popup border
-  still needs a real terminal render check.
+  host and interactive checks. The tmux popup border still needs a real
+  terminal render check.
 - Blockers: none.
 
 ## What was verified
@@ -48,11 +50,19 @@ change; record the actual commands and results here.
 | fzf keys | tmux 3.x `new-window` from `edit-stay` inherits `EDITOR`/`FRECENCY_VIEWER` and creates a new window | pass |
 | Shell helpers | `jc`/`je` in Bash and fish with stub `wl-copy`/`vim`: path copied without newline, `vim -- <path>` called, `$PWD` unchanged | pass |
 | Self-check | `HOME=<disposable> scripts/frecency-test` | pass; bundled 3.46.1 and system 3.45.1 |
+| vifm quoting | stub `SHELL` + argv-logging `frecency` on a path with spaces: old `"%d/%f"` produced `zz\ xy\ test.log`, fixed `%d/%f` produced `zz xy test.log` (source and installed copy) | pass |
+| Installer | `./install.sh --dry-run --register` then `./install.sh --register` | pass; installed copy identical to source, self-check ok |
 | Installer | `./install.sh --dry-run --register`, `./install.sh --dry-run --uninstall` | pass |
 | Interactive UI | `ji` picker keypresses on the maintainer's own terminal | not run (needs a terminal) |
 
 ## Recent changes
 
+- 2026-11-17: fixed the vifm space-path bug. `trackPath`, `trackFile` and
+  `removeRecord` now pass `%d`/`%d/%f` unquoted: vifm already escapes macros
+  for `:!` commands, and the extra double quotes kept `\ ` literal, writing
+  paths such as `/path/zz\ test.log` to the DB. Verified by capturing the
+  expanded shell command and the exact `frecency` argv with a stub; DLT
+  `docs/frecency.md` updated and the local runtime refreshed.
 - 2026-11-17: fzf `v` preview keeps a rounded border in tmux popups. For fzf
   >= 0.58 the picker uses `--tmux 90%,80%,border-native`, temporarily sets
   `popup-border-lines rounded` for a fzf-like look, and restores the previous

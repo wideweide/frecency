@@ -26,15 +26,16 @@
 " trackPath: record the current directory in unified and directory history.
 " With an argument it is stored as a keyword; otherwise as a normal entry.
 " %d is the absolute directory path, %a is the optional keyword.
-command! trackPath !frecency file add --route unified,dir "%d" %a >/dev/null 2>&1 &
+" vifm already shell-escapes %d/%f for :! commands; adding double quotes would keep the backslash-vs-space escapes literal.
+command! trackPath !frecency file add --route unified,dir %d %a >/dev/null 2>&1 &
 
 " trackFile: record a file in the `file` topic only. %a is the optional keyword.
 command! trackFile
-    \ ! [ ! -d "%d/%f" ] && frecency file add --route unified,file "%d/%f" %a >/dev/null 2>&1 &
+    \ ! [ ! -d %d/%f ] && frecency file add --route unified,file %d/%f %a >/dev/null 2>&1 &
 
 " Remove the current path from unified and matching type-specific history
 command! removeRecord
-    \ ! if [ -d "%d/%f" ]; then frecency file remove --route unified,dir "%d/%f"; else frecency file remove --route unified,file "%d/%f"; fi >/dev/null 2>&1 &
+    \ ! if [ -d %d/%f ]; then frecency file remove --route unified,dir %d/%f; else frecency file remove --route unified,file %d/%f; fi >/dev/null 2>&1 &
 
 " Enhanced bookmark: call the external script to update the DB and Vifm bookmarks
 command! Bmark : execute '!bmark.sh %d/%f %a &'
