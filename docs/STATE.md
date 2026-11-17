@@ -5,20 +5,21 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
 
-- Branch: `main`; this fix is commit `ac930b9` (2026-11-17), not yet pushed.
-  Previous code commit `87682b1` is on `origin/main`. The
-  untracked `2026-11-16/` review notes are intentionally not committed. DLT
-  `docs/frecency.md` synced in `6f884b7` (local master, not yet pushed).
-- Active task: none (vifm space-path fix completed this session).
-- Last code change: `frecency.vifm` no longer double-quotes `%d`/`%f` in
-  `:!` commands. vifm already shell-escapes those macros; the quotes preserved
-  the backslash before spaces literally, so opening a file like `zz test.log`
-  with `l` recorded `/path/zz\ test.log`. `trackPath`, `trackFile` and
-  `removeRecord` changed; DLT `docs/frecency.md` synced. Local runtime
-  refreshed with `./install.sh --register`.
-- Next action: no queued task; see [`TASKS.md`](TASKS.md) for remaining manual
-  host and interactive checks. The tmux popup border still needs a real
-  terminal render check.
+- Branch: `main`; HEAD `ea267c9` (2026-11-17), in sync with `origin/main`.
+- Active task: none.
+- Last code change: pre-commit review of the pending audit-remediation + H6/H7
+  changeset found and fixed two bugs: (1) `_dec()` used `printf '%d' "10#N"`,
+  which strtol-parses only up to `#` and returns 10 with stderr noise — every
+  cleanup/auto-prune computed keep=1 and wiped tables with >10 entries to a
+  single row (empirically 50 rows -> 1); now uses `$(( 10#... ))` arithmetic.
+  (2) `do_jump_handler` still had 3 unquoted `$SELF` calls, so `j`/`ji`/`J`/`o`
+  broke (rc 127) under a space-containing install path; now `"$SELF"`.
+- Previous change: audit remediation (batches A-E) covering XDG data dir,
+  octal-safe capacity config, per-DB init locking, path-protocol validation,
+  vifm/bundled-binary safety, installer manifest and path normalization, config
+  validation, and doc consistency. Details under "Recent changes".
+- Next action: commit the reviewed audit-remediation changeset; then see
+  [`TASKS.md`](TASKS.md) for the queued manual host and interactive checks.
 - Blockers: none.
 
 ## What was verified
@@ -46,7 +47,7 @@ change; record the actual commands and results here.
 | fzf keys | viewer chain: `view` preferred (stub), `FRECENCY_VIEWER='less -R'` override honored; directory opens in netrw via `view` | pass |
 | fzf keys | stub fzf: fzf 0.72 emits `--tmux 90%,80%,border-native` without `--border=rounded`; fzf 0.48 falls back to `--tmux 90%,80%` plus `--border=rounded` | pass |
 | fzf keys | stub tmux: entering the UI sets `popup-border-lines rounded`; the RETURN trap restores the saved `single` value | pass |
-| fzf keys | real tmux popup render: rounded border stays visible while `v` viewer owns the popup | not run (tmux client repeatedly exited unexpectedly in this container; relied on fzf 0.58 changelog, which documents `border-native` for programs started inside the popup) |
+| fzf keys | real tmux popup render: rounded border stays visible while `v` viewer owns the popup | pass (confirmed by the maintainer on their terminal) |
 | fzf keys | tmux 3.x `new-window` from `edit-stay` inherits `EDITOR`/`FRECENCY_VIEWER` and creates a new window | pass |
 | Shell helpers | `jc`/`je` in Bash and fish with stub `wl-copy`/`vim`: path copied without newline, `vim -- <path>` called, `$PWD` unchanged | pass |
 | Self-check | `HOME=<disposable> scripts/frecency-test` | pass; bundled 3.46.1 and system 3.45.1 |
@@ -54,9 +55,63 @@ change; record the actual commands and results here.
 | Installer | `./install.sh --dry-run --register` then `./install.sh --register` | pass; installed copy identical to source, self-check ok |
 | Installer | `./install.sh --dry-run --register`, `./install.sh --dry-run --uninstall` | pass |
 | Interactive UI | `ji` picker keypresses on the maintainer's own terminal | not run (needs a terminal) |
+| Audit A-E | `bash -n scripts/frecency scripts/frecency-test scripts/bmark.sh shell/frecency.bash install.sh && fish -n shell/frecency.fish && git diff --check` | pass |
+| Audit A-E | `HOME=<tmp> bash scripts/frecency-test -n -q` (SQLite/MATH/fzf self-check) | pass |
+| Audit A-E | `XDG_DATA_HOME=<tmp> HOME=<tmp2> scripts/frecency file init` twice -> `<tmp>/frecency` exists; `MAX_ENTRIES=08` add/cleanup has no octal error; newline path rejected with rc 2 | pass |
+| Audit A-E | `HOME=<tmp> ./install.sh --dry-run --register` (full preview incl. manifest); `--dry-run --uninstall` safe on fresh HOME; `--uninstall --unregister` exits 2 with clear message | pass |
+| H6/H7 | stub fzf with `frecency` installed under a space-containing dir: all 9 binds receive `tools\ my/frecency` (escaped), 0 bare occurrences; `sh -c` resolves it to a single argv | pass |
+| Review | `bash -n` (5 scripts) + `fish -n` + `git diff --check` | pass |
+| Review | disposable HOME: add/jump-handler/recent/cleanup CLI probes; newline+SEP paths rejected rc 2; `MAX_ENTRIES=08` silently falls back to the 1500 default by design | pass |
+| Review | capacity after `_dec` fix: 50 rows + default limit -> cleanup keeps 50; `MAX_ENTRIES=8` add -> 8 rows (keep 7 + protected new); unified seed auto-pruned to 1350 mid-seed then 1450, new entry protected | pass |
+| Review | space-path script: `jump-handler --emit=path <term>`, no-term and `--picker` variants under `sp ace dir` all rc 0 (were rc 127 before the quoting fix) | pass |
+| Review | installer: `--dry-run --register` full preview, manifest not written on dry-run; fresh-HOME `--dry-run --uninstall` rc 0; `--uninstall --unregister` rc 2; `--dry-run --no-register` preview has 0 register actions | pass |
+| Review | installer round-trip in disposable HOME: `--register` writes the 8-key manifest, `--uninstall` removes 7 files + registrations + manifest, no leftovers in the vifm scripts dir | pass |
 
 ## Recent changes
 
+- 2026-11-17: pre-commit review of the pending changeset fixed two bugs found
+  during re-verification. (1) `_dec()` (audit batch A) used `printf '%d'
+  "10#N"`; bash printf parses numeric args with strtol, so it stopped at `#`
+  and returned 10 with stderr noise. keep then evaluated to 10*10/100=1: every
+  `cleanup` and every automatic prune on a table with more than 10 entries
+  wiped it to one row (verified 50 rows -> 1 before the fix). `_dec` now uses
+  `$(( 10#${1:-0} ))` arithmetic. Capacity re-verified: default limit keeps 50
+  rows; `MAX_ENTRIES=8` prunes to keep 7 + protected new entry; a 1600-row
+  seed auto-pruned to 1350 mid-seed and ended at 1450 with the new entry kept.
+  (2) `do_jump_handler` had 3 unquoted `$SELF` calls left (query picker,
+  internal-query best-match, empty-term query), so the shell `j`/`ji`/`J`/`o`
+  helpers failed under a space-containing install path despite the H6/H7 fix;
+  all three now use `"$SELF"`, verified end-to-end from `sp ace dir/frecency`.
+  A leading-zero `MAX_ENTRIES=08` is rejected by `_is_uint` and falls back to
+  the default (designed octal guard, not an error).
+- 2026-11-17: H6/H7 follow-up (code-verified, not assumed fixed). H7: `$SELF`
+  was still bare in 9 fzf binds plus background cleanup and the query pipeline,
+  so a space-containing install path broke every fzf action; all shell-bound
+  sites now use a `printf '%q'`-quoted `$SELF`, direct calls use `"$SELF"`.
+  H6: `bmark.sh:25` still passed the path/tag unquoted to `vifm --remote -c`;
+  both operands are now `printf '%q'`-quoted (vifm cmdline accepts backslash
+  escapes, matching the `bmark! path tag` documented form). Verified by
+  capturing fzf argv under a space-containing path and by `sh -c` argv parsing.
+- 2026-11-17: audit remediation (batches A-E) applied and verified.
+  - A: `XDG_DATA_HOME` honored for the data dir (default path unchanged);
+    `_is_uint`/`_dec` make capacity config octal-safe; init lock keyed by DB
+    file (shared `file.db` topics serialize together); paths containing newline
+    or SEP rejected at write time; `frecency-test` never deletes a bundled
+    binary inside the source tree; `jc` reuses the xclip-capable copy helper.
+  - B: docs/harness aligned — stale uppercase key hints removed, README/STATE
+    key and border descriptions corrected, TASKS/ACCEPTANCE scopes unified,
+    private details removed from tracked STATE.
+  - C: IFS protected across config source; numeric config validated; delete
+    failure restores table variables; preview commands pass `--` for dash-led
+    paths; Bash helpers forward `"$@"`; README `o` description matches code.
+  - D/E: `frecency-test` locale fallback/stale-cache cleanup/-a glob/dead code;
+    installer strict prompts, mutual-exclusion check, standalone `--dry-run`,
+    preflight, absolute `--vifm-dir` and an install manifest for reversible
+    uninstall; nvim `//` fix; `_apply_highlight` hoisted.
+  - Not applied: M12 (undo EMS fidelity needs a schema migration — deferred to
+    avoid a data-risk change), deep E3 refactors (sql_like templates / grade
+    CASE / version probe / jump-handler) as low benefit vs regression risk,
+    and E1 full config sandboxing (IFS + numeric validation applied instead).
 - 2026-11-17: fixed the vifm space-path bug. `trackPath`, `trackFile` and
   `removeRecord` now pass `%d`/`%d/%f` unquoted: vifm already escapes macros
   for `:!` commands, and the extra double quotes kept `\ ` literal, writing
@@ -117,8 +172,7 @@ change; record the actual commands and results here.
 
 - Bash, fish, vifm, and Neovim host event behavior is not covered by automated
   end-to-end tests; see the "Not covered" section of `REGRESSION.md`.
-- `ji` and the NORMAL-mode `c`/`v`/`e` actions (and uppercase variants) still
-  need an interactive pass on the maintainer's own terminal/tmux setup; the
-  recorded pty checks were run on one machine only. The rounded tmux popup
-  border around `v` previews likewise needs a real terminal render check.
+- `ji` and the NORMAL-mode `c`/`v`/`e` actions still need an interactive pass on
+  the maintainer's own terminal/tmux setup; the recorded pty checks were run on
+  one machine only. (`C`/`V`/`E` are unbound and need no testing.)
 - There is no supported CLI command to reset or list all entries for a topic.

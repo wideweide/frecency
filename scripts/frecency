@@ -76,7 +76,9 @@ SEP=$'\x1f'
 SCHEMA_VERSION=4
 
 # --- Paths and Identity ---
-DATA_DIR="$HOME/.local/share/frecency"
+# XDG_DATA_HOME is honored for the data/cache directory; the default keeps the
+# historical ~/.local/share/frecency location so existing databases are found.
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/frecency"
 mkdir -p "$DATA_DIR"
 SELF=$(readlink -f "$0")
 SCRIPT_DIR=$(dirname "$SELF")
@@ -337,7 +339,15 @@ run_sql() {
 # Safely wrap any string in single quotes (for generated cd / goto commands).
 shq() { local s=${1//\'/\'\\\'\'}; printf '%s' "$s"; }
 
-_is_uint() { [[ ${1:-} =~ ^[0-9]+$ ]]; }
+# Unsigned decimal integer: reject leading zeros so '08' is never parsed as an
+# octal number by $(( )) (which would silently skip capacity cleanup or error).
+_is_uint() { [[ ${1:-} =~ ^(0|[1-9][0-9]*)$ ]]; }
+# Arithmetic-safe decimal value (belt-and-braces for config coming from source).
+# Must use $(( )) arithmetic: printf '%d' parses with strtol and silently stops
+# at the '#' ("10#1500" -> 10), which made capacity cleanup prune to 1 row.
+_dec() { printf '%s' "$(( 10#${1:-0} ))"; }
+# Non-negative decimal number (integer or float), for SLEEP_DELAY / LAMBDA.
+_is_num() { [[ ${1:-} =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; }
 
 # The three file.db tables share file.config for their per-table limits. When a
 # split topic (file_dir/file_file) is invoked directly, pick up any limits from
@@ -525,7 +535,7 @@ _initialize() {
         printf 'frecency: initialization requires flock (util-linux)\n' >&2
         return 1
     fi
-    exec {lock_fd}>"${MARKER}.lock" || return 1
+    exec {lock_fd}>"${LOCK_FILE}" || return 1
     flock -x "$lock_fd" || { exec {lock_fd}>&-; return 1; }
 
     mv=""
@@ -599,8 +609,8 @@ do_cleanup() {
     _ensure_ready || return 1
     local limit keep
     limit=$(_limit_for_dest "$(_dest_for_current_table)")
-    if _is_uint "$limit" && (( limit > 0 )); then
-        keep=$(( limit * _PRUNE_FILL_PERCENT / 100 ))
+    if _is_uint "$limit" && (( $(_dec "$limit") > 0 )); then
+        keep=$(( $(_dec "$limit") * $(_dec "$_PRUNE_FILL_PERCENT") / 100 ))
         (( keep >= 1 )) || keep=1
         _prune_table "$ENTRY_TABLE" "$TICK_KEY" "$LAMBDA" "$keep" || return 1
     fi
@@ -671,13 +681,15 @@ SELECT COUNT(*) FROM $table WHERE keyword = '';"
     local i limit n keep
     for i in "${!dests[@]}"; do
         limit=$(_limit_for_dest "${dests[$i]}")
-        if ! _is_uint "$limit" || (( limit <= 0 )); then
+        if ! _is_uint "$limit"; then
             continue
         fi
+        limit=$(_dec "$limit")
+        (( limit > 0 )) || continue
         n=${counts[$i]:-}
         _is_uint "$n" || continue
-        if (( n > limit )); then
-            keep=$(( limit * _PRUNE_FILL_PERCENT / 100 ))
+        if (( $(_dec "$n") > limit )); then
+            keep=$(( limit * $(_dec "$_PRUNE_FILL_PERCENT") / 100 ))
             (( keep >= 1 )) || keep=1
             _prune_table "${tables[$i]}" "${ticks[$i]}" "${lambdas[$i]}" "$keep" "$content" || return 1
         fi
@@ -700,6 +712,13 @@ do_add() {
         esac
     done
     [[ -n "$content" ]] || { printf 'Usage: frecency <topic> add [--route destinations] <content> [keyword]\n' >&2; return 2; }
+    # The query/UI output protocol is line-based with SEP as a field delimiter;
+    # a newline or SEP inside a path would break row parsing on read. Reject
+    # such paths at write time rather than storing unreadable records.
+    if [[ "$content" == *$'\n'* || "$content" == *$'\r'* || "$content" == *"$SEP"* ]]; then
+        printf 'frecency: refusing to record a path containing a newline or separator\n' >&2
+        return 2
+    fi
 
     for pattern in "${IGNORE_PATTERNS[@]}"; do
         [[ "$content" == $pattern ]] && return 0
@@ -737,9 +756,9 @@ do_add() {
     if (( RANDOM % 1000 == 0 )); then
         for dest in "${_route_targets[@]}"; do
             case "$dest" in
-                unified) $SELF file cleanup >/dev/null 2>&1 & ;;
-                dir)     $SELF file_dir cleanup >/dev/null 2>&1 & ;;
-                file)    $SELF file_file cleanup >/dev/null 2>&1 & ;;
+                unified) "$SELF" file cleanup >/dev/null 2>&1 & ;;
+                dir)     "$SELF" file_dir cleanup >/dev/null 2>&1 & ;;
+                file)    "$SELF" file_file cleanup >/dev/null 2>&1 & ;;
             esac
         done
     fi
@@ -752,7 +771,7 @@ do_add() {
 # (e.g. a DirEnter directory change) from swallowing the record.
 do_recent() {
     local seconds="${1:-5}" content="${2:-}"
-    [[ "$seconds" =~ ^[0-9]+$ ]] || {
+    _is_uint "$seconds" || {
         printf 'frecency: recent requires a whole number of seconds: %s\n' "$seconds" >&2
         return 2
     }
@@ -769,6 +788,18 @@ do_recent() {
 # ============================================================================
 # Preview
 # ============================================================================
+# Highlight a text file within a line limit; prefer bat, then highlight, then head.
+_apply_highlight() {
+    local target="$1" limit="$2"
+    if command -v bat >/dev/null 2>&1; then
+        bat --color=always --style=plain --line-range=:"$limit" -- "$target"
+    elif command -v highlight >/dev/null 2>&1; then
+        highlight -O ansi --force "$target" | head -n "$limit"
+    else
+        head -n "$limit" -- "$target"
+    fi
+}
+
 do_preview() {
     local content="${1##*$SEP}"     # last field = the real path/command
     local db_info
@@ -847,32 +878,21 @@ do_preview() {
     fi
     printf '\n'
 
-    _apply_highlight() {
-        local target="$1"; local limit="$2"
-        if command -v bat >/dev/null 2>&1; then
-            bat --color=always --style=plain --line-range=:"$limit" "$target"
-        elif command -v highlight >/dev/null 2>&1; then
-            highlight -O ansi --force "$target" | head -n "$limit"
-        else
-            head -n "$limit" "$target"
-        fi
-    }
-
     if [[ -e "$content" ]]; then
         if [[ -d "$content" ]]; then
             printf '%s%s%s\n' "${C_BLUE}${C_BOLD}" "--- Directory Contents ---" "$C_NORMAL"
             command -v eza >/dev/null 2>&1 \
-                && eza -a --color=always --icons --no-permissions --no-user --no-time --no-filesize "$content" | head -n 40 \
-                || ls -la --color=always "$content" | head -n 40
+                && eza -a --color=always --icons --no-permissions --no-user --no-time --no-filesize -- "$content" | head -n 40 \
+                || ls -la --color=always -- "$content" | head -n 40
         else
-            local mime=$(file --mime-type -b "$content" 2>/dev/null)
-            local desc=$(file -b "$content" 2>/dev/null)
+            local mime=$(file --mime-type -b -- "$content" 2>/dev/null)
+            local desc=$(file -b -- "$content" 2>/dev/null)
             if [[ "$mime" == text/* || "$desc" == *"text"* || "$desc" == *"script"* ]]; then
                 printf '%s%s%s\n' "${C_GREEN}${C_BOLD}" "--- Text Preview ---" "$C_NORMAL"
                 _apply_highlight "$content" 100
             else
                 printf '%s%s%s\n' "${C_BLUE}${C_BOLD}" "--- Binary File Info ---" "$C_NORMAL"
-                file -b "$content"; ls -ldh "$content" | awk '{print "Size: "$5"\nPerms: "$1"\nOwner: "$3}'
+                file -b -- "$content"; ls -ldh -- "$content" | awk '{print "Size: "$5"\nPerms: "$1"\nOwner: "$3}'
             fi
         fi
     elif [[ "$TOPIC" == file* || "$TOPIC" == "dir" ]]; then
@@ -1137,7 +1157,10 @@ do_remove() {
             file) ENTRY_TABLE=file_entries; TRASH_TABLE=file_deleted_entries; TICK_KEY=file_tick ;;
             *) printf 'frecency: invalid --route destination: %s\n' "$dest" >&2; return 2 ;;
         esac
-        _do_internal_op del "$content" || return 1
+        if ! _do_internal_op del "$content"; then
+            ENTRY_TABLE=$old_table; TRASH_TABLE=$old_trash; TICK_KEY=$old_tick
+            return 1
+        fi
     done
     ENTRY_TABLE=$old_table; TRASH_TABLE=$old_trash; TICK_KEY=$old_tick
 }
@@ -1172,7 +1195,7 @@ do_query_ui() {
 
     local P_NORMAL="${C_GREEN}${C_BOLD}● NORMAL${C_NORMAL}${C_BOLD} > "
     local P_SEARCH="${C_BLUE}${C_BOLD}● SEARCH${C_NORMAL}${C_BOLD} > "
-    local FOOTER_HINTS="/Search  Esc Normal/Exit  d Del  r Unbook  u Undo  c/C Copy  v/V View  e/E Edit  ↵ Accept"
+    local FOOTER_HINTS="/Search  Esc Normal/Exit  d Del  r Unbook  u Undo  c Copy  v View  e Edit  ↵ Accept"
     local FOOTER_STR="$FOOTER_HINTS"
     local SEARCH_ACTION=enable-search
     local -a FZF_VIEW_OPTS=(--with-nth=1)
@@ -1265,17 +1288,21 @@ COPYFOOTER
     # and exits fzf without emitting a path: inside tmux the editor opens in a
     # new fullscreen window and fzf aborts; without tmux the editor runs in the
     # current terminal and fzf aborts when it finishes.
+    # fzf passes execute/reload/preview actions to a shell. Quote SELF with
+    # printf %q so an install path containing spaces or metacharacters stays a
+    # single command word (plain double quotes would still let a `$` expand).
+    local _QSELF=$(printf '%q' "$SELF")
     local -a ACTION_KEY_BINDS=(
-        --bind "c:execute-silent($SELF \"$TOPIC\" fzf-action copy {2})+transform:$_copy_footer {2}"
-        --bind "v:execute($SELF \"$TOPIC\" fzf-action view {2})"
+        --bind "c:execute-silent($_QSELF \"$TOPIC\" fzf-action copy {2})+transform:$_copy_footer {2}"
+        --bind "v:execute($_QSELF \"$TOPIC\" fzf-action view {2})"
     )
     if [[ -n "$TMUX" ]]; then
         ACTION_KEY_BINDS+=(
-            --bind "e:execute($SELF \"$TOPIC\" fzf-action edit-stay {2})+abort"
+            --bind "e:execute($_QSELF \"$TOPIC\" fzf-action edit-stay {2})+abort"
         )
     else
         ACTION_KEY_BINDS+=(
-            --bind "e:execute($SELF \"$TOPIC\" fzf-action edit {2})+abort"
+            --bind "e:execute($_QSELF \"$TOPIC\" fzf-action edit {2})+abort"
         )
     fi
 
@@ -1286,23 +1313,23 @@ COPYFOOTER
     [[ "$START_MODE" == "normal" ]] && START_BIND="start:disable-search+change-prompt($P_NORMAL)+$SET_NORMAL"
 
     local SEARCH_BIND="$SEARCH_ACTION+unbind($VIM_NAV)+change-prompt($P_SEARCH)+$SET_SEARCH"
-    [[ "$START_DATA" == "last" ]] && SEARCH_BIND="$SEARCH_BIND+transform:test -z '{q}' && echo 'reload($SELF \"$TOPIC\" internal-query all)' || echo 'nop'"
+    [[ "$START_DATA" == "last" ]] && SEARCH_BIND="$SEARCH_BIND+transform:test -z '{q}' && echo 'reload($_QSELF \"$TOPIC\" internal-query all)' || echo 'nop'"
 
     local CHANGE_BIND="first"
-    [[ "$SEARCH_MODE" == "sqlite" ]] && CHANGE_BIND="reload(sleep $SLEEP_DELAY; $SELF \"$TOPIC\" internal-query all {q} || true)+$CHANGE_BIND"
+    [[ "$SEARCH_MODE" == "sqlite" ]] && CHANGE_BIND="reload(sleep $SLEEP_DELAY; $_QSELF \"$TOPIC\" internal-query all {q} || true)+$CHANGE_BIND"
     CHANGE_BIND+="+transform:$_footer_handler {q} '$_order_file' '$SEARCH_MODE'"
 
-    local RELOAD_AND_FILTER="reload($SELF \"$TOPIC\" internal-query $RELOAD_QUERY)+$SEARCH_ACTION+$SET_SEARCH"
+    local RELOAD_AND_FILTER="reload($_QSELF \"$TOPIC\" internal-query $RELOAD_QUERY)+$SEARCH_ACTION+$SET_SEARCH"
 
     local -a ORDER_MODE_BIND=()
     if [[ "$SEARCH_MODE" == "sqlite" ]]; then
-        ORDER_MODE_BIND+=(--bind "s:execute-silent($_order_toggle '$_order_file')+reload($SELF \"$TOPIC\" internal-query all {q} || true)+transform:$_footer_handler {q} '$_order_file' '$SEARCH_MODE'")
+        ORDER_MODE_BIND+=(--bind "s:execute-silent($_order_toggle '$_order_file')+reload($_QSELF \"$TOPIC\" internal-query all {q} || true)+transform:$_footer_handler {q} '$_order_file' '$SEARCH_MODE'")
     fi
 
     # Keep only one fzf invocation: the two TERM branches had identical flags/bind,
     # and duplicated maintenance already caused one missed change (accept-nth).
     # Highlighting happens at the internal-query source and goes straight into fzf.
-    FRECENCY_ORDER_FILE="$_order_file" $SELF "$TOPIC" internal-query "$INITIAL_DATA" "$search_term" | \
+    FRECENCY_ORDER_FILE="$_order_file" "$SELF" "$TOPIC" internal-query "$INITIAL_DATA" "$search_term" | \
         FRECENCY_ORDER_FILE="$_order_file" fzf \
             --ansi --query "$search_term" --footer "$FOOTER_STR" \
             --layout=reverse --tiebreak='index' --no-sort $tmux_opt \
@@ -1312,18 +1339,18 @@ COPYFOOTER
             --bind "x:$SEARCH_ACTION+clear-query+$SET_SEARCH" \
             --bind "esc:transform:$_esc_handler" \
             --bind "j:down,k:up,h:backward-char,l:forward-char,g:first,G:last,q:abort" \
-            --bind "d:execute-silent($SELF \"$TOPIC\" internal-op del {})+$RELOAD_AND_FILTER" \
-            --bind "r:execute-silent($SELF \"$TOPIC\" internal-op unbook {})+$RELOAD_AND_FILTER" \
-            --bind "u:execute-silent($SELF \"$TOPIC\" internal-op undo)+$RELOAD_AND_FILTER" \
+            --bind "d:execute-silent($_QSELF \"$TOPIC\" internal-op del {})+$RELOAD_AND_FILTER" \
+            --bind "r:execute-silent($_QSELF \"$TOPIC\" internal-op unbook {})+$RELOAD_AND_FILTER" \
+            --bind "u:execute-silent($_QSELF \"$TOPIC\" internal-op undo)+$RELOAD_AND_FILTER" \
             "${ACTION_KEY_BINDS[@]}" \
             "${ORDER_MODE_BIND[@]}" \
-            --preview "$SELF \"$TOPIC\" preview {}"
+            --preview "$_QSELF \"$TOPIC\" preview {}"
 }
 
 # ============================================================================
 # Jump / output for the caller to execute
 # ============================================================================
-# Pick the viewer for NORMAL-mode `v`/`V`. `view` (vim read-only) is preferred:
+# Pick the viewer for NORMAL-mode `v`. `view` (vim read-only) is preferred:
 # it gives syntax highlighting and normal-mode navigation. FRECENCY_VIEWER can
 # override the first choice; otherwise the chain degrades to $PAGER, less, cat.
 _frecency_viewer_cmd() {
@@ -1414,13 +1441,13 @@ do_jump_handler() {
 
     if (( picker )); then
         # Interactive picker; an optional term becomes the initial fzf query.
-        res=$($SELF "$TOPIC" query "$term") || exit 0
+        res=$("$SELF" "$TOPIC" query "$term") || exit 0
         [[ -z "$res" ]] && exit 0
     elif [[ -n "$term" ]]; then
         # zoxide / ze semantics: with a query, skip fzf and take the best entry by
         # EMS + match grade (first internal-query row = highest grade, then highest
         # score_cur within that grade).
-        res=$($SELF "$TOPIC" internal-query all "$term" | head -n 1)
+        res=$("$SELF" "$TOPIC" internal-query all "$term" | head -n 1)
         if [[ -z "$res" ]]; then
             # The shell integrations pre-check `-` and existing paths, so a
             # non-empty term that reaches here matched nothing. Report it instead
@@ -1436,7 +1463,7 @@ do_jump_handler() {
             exit 0
         fi
     else
-        res=$($SELF "$TOPIC" query) || exit 0
+        res=$("$SELF" "$TOPIC" query) || exit 0
         [[ -z "$res" ]] && exit 0
     fi
     local raw_path="${res##*$SEP}"
@@ -1517,6 +1544,9 @@ for _T in "${TOPICS[@]}"; do
     esac
     export CONFIG_PATH="$DATA_DIR/${_T}.config"
     export MARKER="$DATA_DIR/.${_T}.v4"
+    # Lock by database file, not by topic: file/file_dir/file_file share file.db,
+    # so they must serialize first-time migration on the same lock.
+    export LOCK_FILE="$DATA_DIR/.$(basename "$DB_PATH").init.lock"
 
     case "$_T" in
         file_dir) ENTRY_TABLE=dir_entries; TRASH_TABLE=dir_deleted_entries; TICK_KEY=dir_tick ;;
@@ -1540,7 +1570,22 @@ for _T in "${TOPICS[@]}"; do
     MAX_ENTRIES_DIR=
     MAX_ENTRIES_FILE=
     _SHARED_LIMITS_LOADED=0
-    [[ -f "$CONFIG_PATH" ]] && source "$CONFIG_PATH"
+    if [[ -f "$CONFIG_PATH" ]]; then
+        # A config may accidentally change IFS, which would corrupt every later
+        # `read -a` word split (multi-word matching, grading, footer). Keep the
+        # shell's word-splitting stable regardless of config contents.
+        _saved_ifs="$IFS"
+        source "$CONFIG_PATH"
+        IFS="$_saved_ifs"
+        # Validate numeric config before it reaches SQL or shell command strings.
+        _is_num "$LAMBDA" || LAMBDA=$_lambda_default
+        _is_num "$SLEEP_DELAY" || SLEEP_DELAY=0.06
+        _is_uint "$UNDO_KEEP" || UNDO_KEEP=200
+        _is_uint "$_PRUNE_FILL_PERCENT" || _PRUNE_FILL_PERCENT=90
+        (( _PRUNE_FILL_PERCENT <= 100 )) || _PRUNE_FILL_PERCENT=90
+        _is_uint "$LAST_LIMIT" || LAST_LIMIT=15
+        _is_uint "$MAX_PATH_CHARS" || MAX_PATH_CHARS=60
+    fi
 
     if [[ "$LAMBDA" == "$_lambda_default" ]]; then
         # No explicit override: keep the per-destination defaults so a mixed

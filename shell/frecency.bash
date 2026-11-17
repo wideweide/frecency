@@ -51,7 +51,7 @@ o() {
         fi
     fi
     local sel
-    sel=$(frecency file jump-handler --emit=path "$*") || return
+    sel=$(frecency file jump-handler --emit=path "$@") || return
     [[ -z "$sel" ]] && return 0
     if [[ -d "$sel" ]]; then
         cd -- "$sel"
@@ -76,7 +76,7 @@ j() {
         fi
     fi
     local cmd
-    cmd=$(frecency file_dir jump-handler "$*") || return
+    cmd=$(frecency file_dir jump-handler "$@") || return
     # An fzf abort produces no output; return quietly instead of failing.
     [[ -z "$cmd" ]] && return 0
     eval "$cmd"
@@ -85,7 +85,7 @@ j() {
 # Interactive directory-history picker (zoxide `zi` equivalent).
 ji() {
     local cmd
-    cmd=$(frecency file_dir jump-handler --picker "$*") || return
+    cmd=$(frecency file_dir jump-handler --picker "$@") || return
     [[ -z "$cmd" ]] && return 0
     eval "$cmd"
 }
@@ -96,7 +96,7 @@ J() {
         return
     fi
     local path
-    path=$(frecency file_file jump-handler --emit=path "$*") || return
+    path=$(frecency file_file jump-handler --emit=path "$@") || return
     [[ -z "$path" ]] && return 0
     __frecency_emit_path "$path"
 }
@@ -108,7 +108,7 @@ jc() {
     local f
     f=$(J "$@") || return
     [[ -n "$f" ]] || return 0
-    printf '%s' "$f" | wl-copy
+    __frecency_copy_path "$f"
 }
 
 je() {
@@ -129,11 +129,7 @@ __frecency_pick() {
     [[ -n "$selected" ]] || return 0
     READLINE_LINE="${READLINE_LINE:0:$READLINE_POINT}${selected}${READLINE_LINE:$READLINE_POINT}"
     READLINE_POINT=$((READLINE_POINT + ${#selected}))
-    if command -v wl-copy >/dev/null 2>&1; then
-        printf '%s' "$selected" | wl-copy
-    elif command -v xclip >/dev/null 2>&1; then
-        printf '%s' "$selected" | xclip -selection clipboard
-    fi
+    __frecency_copy_path "$selected"
 }
 
 # Bind only in an interactive shell, judged the way bash itself does: the

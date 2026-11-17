@@ -19,8 +19,8 @@ checklist is [`REGRESSION.md`](REGRESSION.md).
 - [ ] Database changes are migration-safe and idempotent.
 - [ ] No machine-specific paths, credentials, or private workflow details are
       added to tracked files.
-- [ ] `STATE.md` records status, actual verification, blockers, and the next
-      step; `TASKS.md` reflects queued and completed work.
+- [ ] `STATE.md` records status, actual verification, blockers, the next step,
+      and completed work; `TASKS.md` tracks only queued work.
 - [ ] `git diff --check` passes and each commit contains only intended changes.
 
 ## Area gates

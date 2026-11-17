@@ -53,6 +53,9 @@ NVIM_FILE="${NVIM_DIR}/frecency/frecency.lua"
 NVIM_INIT="${NVIM_DIR}/init.lua"
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 BIN_LINK_TARGET="$VIFM_DIR/scripts/frecency"
+# Manifest records the paths chosen at install time so --uninstall/--unregister
+# can find them even when XDG variables or --vifm-dir differ later.
+MANIFEST="${XDG_DIR}/frecency/install-manifest"
 
 # Only the native-architecture sqlite3 is installed; frecency-test probes it.
 ARCH=""
@@ -75,10 +78,11 @@ REG_BASH=-1
 REG_NVIM=-1
 BIN_LINK=-1   # symlink in $BIN_DIR: -1 = undecided, 0 = skip, 1 = create
 MODE_GIVEN=0
+DRY_ONLY_GIVEN=0
 while [[ $# -gt 0 ]]; do
     arg="$1"
     case "$arg" in
-        --dry-run)     DRY_RUN=1 ;;
+        --dry-run)     DRY_RUN=1; MODE_GIVEN=1; DRY_ONLY_GIVEN=1 ;;
         --uninstall)   UNINSTALL=1; MODE_GIVEN=1 ;;
         --unregister)  UNREGISTER=1; MODE_GIVEN=1 ;;
         --register)    REGISTER=1; REG_FISH=1; REG_BASH=1; REG_NVIM=1; BIN_LINK=1; MODE_GIVEN=1 ;;
@@ -96,8 +100,52 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+# Normalize --vifm-dir to an absolute path: registration lines and the bin
+# symlink target are stored as literal paths and would break if a relative
+# directory were interpreted from another working directory later.
+if [[ "$VIFM_DIR" != /* ]]; then
+    # Resolve syntactically even when the directory does not exist yet (dry-run
+    # or fresh install): normalize the absolute form without requiring cd.
+    if [[ -d "$VIFM_DIR" ]]; then
+        VIFM_DIR="$(cd "$VIFM_DIR" && pwd -P)"
+    else
+        VIFM_DIR="$PWD/${VIFM_DIR#./}"
+    fi
+fi
 VIFMRC="${VIFM_DIR}/vifmrc"
 BIN_LINK_TARGET="$VIFM_DIR/scripts/frecency"
+
+# On uninstall/unregister, prefer paths from the manifest written at install
+# time so a changed XDG environment or a forgotten --vifm-dir still finds the
+# previous installation. Only known keys are imported.
+load_manifest() {
+    [[ -f "$MANIFEST" ]] || return 0
+    local key val
+    while IFS='=' read -r key val; do
+        [[ -n "$key" && "$key" != \#* ]] || continue
+        case "$key" in
+            VIFM_DIR)  VIFM_DIR="$val" ;;
+            FISH_FILE) FISH_FILE="$val" ;;
+            FISH_CONFIG) FISH_CONFIG="$val" ;;
+            BASH_FILE) BASH_FILE="$val" ;;
+            BASH_RC)   BASH_RC="$val" ;;
+            NVIM_FILE) NVIM_FILE="$val" ;;
+            NVIM_INIT) NVIM_INIT="$val" ;;
+            BIN_DIR)   BIN_DIR="$val" ;;
+        esac
+    done < "$MANIFEST"
+    VIFMRC="${VIFM_DIR}/vifmrc"
+    BIN_LINK_TARGET="$VIFM_DIR/scripts/frecency"
+    printf 'Using install paths from %s\n' "$MANIFEST"
+}
+
+if (( UNINSTALL + UNREGISTER > 1 )); then
+    printf '%s\n' '--uninstall and --unregister are mutually exclusive' >&2
+    exit 2
+fi
+if [[ $UNINSTALL -eq 1 || $UNREGISTER -eq 1 ]]; then
+    load_manifest
+fi
 
 run() {
     if [[ $DRY_RUN -eq 1 ]]; then
@@ -233,9 +281,10 @@ ask_yes() {
     printf '%s [%s]: ' "$prompt" "$default"
     read -r choice || choice=""
     choice="${choice:-$default}"
-    case "$choice" in
-        y|Y|yes|Yes) return 0 ;;
-        *)           return 1 ;;
+    case "${choice,,}" in
+        y|yes) return 0 ;;
+        n|no)  return 1 ;;
+        *)     printf 'Invalid answer: %s (use y/n)\n' "$choice"; ask_yes "$prompt" "$default" ;;
     esac
 }
 
@@ -283,6 +332,16 @@ interactive_menu() {
         *)  printf 'Invalid choice: %s\n' "$choice" >&2; exit 2 ;;
     esac
 }
+
+# A standalone --dry-run previews the full install+register flow unless the
+# caller explicitly opted out with --no-register/--no-bin-link.
+if [[ $DRY_ONLY_GIVEN -eq 1 ]]; then
+    [[ $REGISTER -eq -1 ]]  && REGISTER=1
+    [[ $REG_FISH -eq -1 ]]  && REG_FISH=1
+    [[ $REG_BASH -eq -1 ]]  && REG_BASH=1
+    [[ $REG_NVIM -eq -1 ]]  && REG_NVIM=1
+    [[ $BIN_LINK -eq -1 ]]  && BIN_LINK=1
+fi
 
 if [[ $MODE_GIVEN -eq 0 && -t 0 ]]; then
     interactive_menu
@@ -347,15 +406,25 @@ if [[ $UNINSTALL -eq 1 ]]; then
             run rmdir --ignore-fail-on-non-empty "$d" || true
         fi
     done
-    [[ $DRY_RUN -eq 0 ]] && printf 'Removed %d file(s) and cleaned up registration lines.\n' "${#removed[@]}"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        rm -f "$MANIFEST"
+        printf 'Removed %d file(s) and cleaned up registration lines.\n' "${#removed[@]}"
+    fi
     exit 0
 fi
 
 # ---------------------------------------------------------------------------
 # Install files
 # ---------------------------------------------------------------------------
+# Preflight every source file before copying anything, so a missing file cannot
+# leave a half-installed state.
+for _src in "${SCRIPTS[@]/#/$SRC_DIR\/scripts\/}" \
+            "$SRC_DIR/frecency.vifm" "$SRC_DIR/shell/frecency.bash" \
+            "$SRC_DIR/shell/frecency.fish" "$SRC_DIR/nvim/frecency.lua"; do
+    [[ -f "$_src" ]] || { printf 'missing source file: %s\n' "$_src" >&2; exit 1; }
+done
 [[ -x "$SRC_DIR/scripts/frecency" ]] || {
-    printf 'frecency not found in %s/scripts\n' "$SRC_DIR" >&2; exit 1
+    printf 'frecency is not executable: %s/scripts/frecency\n' "$SRC_DIR" >&2; exit 1
 }
 
 # Does the system sqlite3 satisfy frecency's requirements: >= 3.35.0 built
@@ -412,6 +481,18 @@ fi
 
 if [[ $DRY_RUN -eq 0 ]]; then
     printf 'Installed %d file(s) into %s and %s\n' "${#installed[@]}" "$TARGET" "$VIFM_DIR"
+    mkdir -p "$(dirname "$MANIFEST")"
+    cat > "$MANIFEST" <<EOF
+# frecency install paths (written at install time; do not edit)
+VIFM_DIR=$VIFM_DIR
+FISH_FILE=$FISH_FILE
+FISH_CONFIG=$FISH_CONFIG
+BASH_FILE=$BASH_FILE
+BASH_RC=$BASH_RC
+NVIM_FILE=$NVIM_FILE
+NVIM_INIT=$NVIM_INIT
+BIN_DIR=$BIN_DIR
+EOF
 fi
 
 # ---------------------------------------------------------------------------

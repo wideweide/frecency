@@ -227,7 +227,7 @@ In vifm (defined in `frecency.vifm`):
 | `l` / `<CR>` | open and record the file |
 | `dd` | delete the file and remove its record |
 | `M` | bookmark the current entry with a keyword |
-| `o` | jump from history: type words to jump to the best match directly, empty input opens fzf |
+| `o` | jump from history: opens fzf over unified history (use `:j <query>` / `:J <query>` to jump directly to the best directory/file match without fzf) |
 | `O` | browse the current directory tree with fzf (`--walker`), complements `o`'s global history |
 
 Inside the frecency fzf UI (NORMAL mode; these keys only filter text in SEARCH mode):
@@ -248,11 +248,11 @@ Inside the frecency fzf UI (NORMAL mode; these keys only filter text in SEARCH m
 | `e` | edit with `$EDITOR` (fallback `vi`) and exit fzf without emitting a path; inside tmux opens a new fullscreen window, otherwise runs in the current terminal |
 | `Enter` | jump (the only key that emits a path and can change the shell's directory) |
 
-`c` and `v` use fzf `execute`/`execute-silent`, which suspends the picker so the
-program owns the tmux popup or terminal and renders normally. In a tmux popup,
-fzf >= 0.58 draws the border through tmux (rounded, matching fzf's style) so it
-stays visible while the `v` viewer runs; older fzf loses its self-drawn border
-during `execute`. The copied-path
+`v` uses fzf `execute`, which suspends the picker so the viewer owns the tmux
+popup or terminal and renders normally; `c` uses `execute-silent` and never
+takes over the terminal. In a tmux popup, fzf >= 0.58 lets tmux draw the
+rounded border so it remains visible while the `v` viewer runs; with older
+fzf the self-drawn border disappears during `execute`. The copied-path
 footer makes repeated copies unambiguous when switching between entries. `v`
 restores the picker untouched on exit, so you can walk through filtered
 entries one by one. `e` runs the editor and then aborts fzf **without emitting
@@ -346,8 +346,9 @@ recorded since vifm cannot have seen them.
 
 ## Configuration
 
-Per-topic overrides live in `~/.local/share/frecency/<topic>.config` and are
-sourced by the script on start. Defaults:
+Per-topic overrides live in `<data dir>/frecency/<topic>.config` (see
+[Data and maintenance](#data-and-maintenance)) and are sourced by the script on
+start. Defaults:
 
 ```bash
 SEARCH_MODE=sqlite        # sqlite: per-keystroke SQL query (default)
@@ -363,6 +364,8 @@ MAX_ENTRIES_FILE=         # per-table override for `file_entries`
 MAX_PATH_CHARS=60         # weighted display width before list paths abbreviate
 START_MODE=search         # 'search' starts with prompt ready, 'normal' with Vim keys
 START_DATA=all            # 'all' loads everything, 'last' only the LAST_LIMIT recent entries
+LAST_LIMIT=15             # how many entries START_DATA=last loads
+SLEEP_DELAY=0.06          # reload debounce (seconds) for sqlite search mode
 UNDO_KEEP=200             # how many deleted entries are kept for undo
 RECORD_UNIFIED=1          # also write to the unified `entries` history
 RECORD_SPLIT=1            # also write to the matching typed history
@@ -398,9 +401,11 @@ files only. Ignore patterns are checked when entries are added.
 ## Data and maintenance
 
 Topic databases and their configuration live in
-`~/.local/share/frecency/`; for example, `file` uses
-`~/.local/share/frecency/file.db`. The script currently uses this fixed
-location under `$HOME` and has no data-directory override.
+`${XDG_DATA_HOME:-$HOME/.local/share}/frecency/`; for example, `file` uses
+`<data dir>/frecency/file.db`. With no `XDG_DATA_HOME` set this is
+`~/.local/share/frecency/`, the historical location, so existing databases are
+found unchanged. `frecency-test` writes the sqlite3 selection cache to the same
+directory.
 
 To back up or move history safely, stop shells and applications that may write
 to frecency, then copy the **entire** directory, including any SQLite `-wal`
@@ -438,8 +443,8 @@ discard history and leave related SQLite state behind.
 
 Databases use SQLite WAL mode, and schema initialization/migration is protected
 by `flock`. `frecency <topic> init` initializes or migrates a topic explicitly;
-the UI's `C` key runs cleanup immediately, while `u` restores the latest
-deleted entry.
+run `frecency <topic> cleanup` for manual maintenance, while the UI's `u`
+restores the latest deleted entry.
 
 Maintainers can use the [regression checklist](docs/REGRESSION.md) before
 releasing changes.

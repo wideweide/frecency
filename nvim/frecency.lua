@@ -48,7 +48,9 @@ local function absolute_input_path(path)
             cwd = pwd
         end
     end
-    return cwd .. "/" .. path
+    -- Avoid a double slash when cwd is the filesystem root.
+    local sep = (cwd:sub(-1) == "/" or path:sub(1, 1) == "/") and "" or "/"
+    return cwd .. sep .. path
 end
 
 -- Record a file unless this exact path was recorded recently, which means

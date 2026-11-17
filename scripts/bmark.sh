@@ -22,4 +22,6 @@ else
 fi
 
 
-vifm --remote -c "bmark! $PATH_TO_ADD $TAG_NAME"
+# vifm parses the -c argument as a shell-like command, so quote both operands:
+# a path or tag containing spaces/metacharacters must stay a single word.
+vifm --remote -c "bmark! $(printf '%q' "$PATH_TO_ADD") $(printf '%q' "$TAG_NAME")"

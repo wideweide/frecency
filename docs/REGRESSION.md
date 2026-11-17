@@ -117,7 +117,7 @@ entry survives. `MAX_ENTRIES=0` disables automatic pruning for that table.
 
    Expected: preview identifies the missing path and offers the `d` cleanup
    action. Delete the row with `d`; the record should no longer appear. The
-   `c`/`C` keys copy the selected path and do not remove missing paths; capacity
+   `c` key copies the selected path and does not remove missing paths; capacity
    cleanup is automatic after writes and can also be run with
    `frecency <topic> cleanup`.
 
@@ -355,8 +355,8 @@ later checks. UI and host integration behavior still requires manual testing.
 - Automated end-to-end checks for Bash, fish, Vifm, and Neovim host event
   behavior are not currently provided; those integrations need manual host
   testing.
-- The interactive `ji` picker and NORMAL-mode `c`/`v`/`e` actions (and their
-  uppercase variants) need a real terminal and are not exercised by the
-  automated capacity/CLI commands.
+- The interactive `ji` picker and NORMAL-mode `c`/`v`/`e` actions need a real
+  terminal and are not exercised by the automated capacity/CLI commands.
+  (`C`/`V`/`E` are unbound.)
 - There is no supported command to reset a topic database or list its entries
   without the interactive query UI.

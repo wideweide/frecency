@@ -113,7 +113,7 @@ function jc --description "copy a selected file path to the clipboard"
     set -l rc $status
     test $rc -eq 0; or return $rc
     test -n "$f"; or return 0
-    printf '%s' "$f" | wl-copy
+    __frecency_copy_path "$f"
 end
 
 function je --description "edit a selected file path with vim"
@@ -131,11 +131,7 @@ function __frecency_pick --description "Pick a path from frecency history into t
     set -l selected (frecency file query)
     if test $status -eq 0 -a -n "$selected"
         commandline -i -- "$selected"
-        if command -qv wl-copy
-            printf '%s' "$selected" | wl-copy
-        else if command -qv xclip
-            printf '%s' "$selected" | xclip -selection clipboard
-        end
+        __frecency_copy_path "$selected"
         commandline -f repaint
     end
 end

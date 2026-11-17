@@ -14,13 +14,14 @@
 #   1. Probe the sqlite3 this machine will actually use: the system version
 #      first, then the bundled (native arch) fallback;
 #   2. Probe features with real SQL statements (not just version numbers);
-#   3. If bundled is incompatible, delete that file -> frecency falls back to
-#      the system sqlite3;
+#   3. If an installed bundled copy is incompatible, delete it -> frecency falls
+#      back to the system sqlite3. A bundled binary inside the source tree is
+#      reported but never deleted (it is a tracked project file);
 #   4. If the system sqlite3 is also incompatible, fail loudly instead of
 #      failing silently.
 #
 # Checks are split into two levels (important):
-#   critical : decides compatibility. Failure -> delete bundled / mark unusable
+#   critical : decides compatibility. Failure -> delete installed bundled copy / mark unusable
 #   advisory : informational. Failure -> warn only, never affects deletion
 #        Example: "special-character round-trip" is a known limitation of the
 #        frecency script itself; switching sqlite3 does not help, so counting it
@@ -57,7 +58,7 @@ DRY_RUN=0
 VERBOSE=0
 PROBE_ALL=0
 QUIET=0
-DATA_DIR="${HOME:-/tmp}/.local/share/frecency"
+DATA_DIR="${XDG_DATA_HOME:-${HOME:-/tmp}/.local/share}/frecency"
 CACHE="$DATA_DIR/.sqlite3.bin"
 
 # --- Minimum versions (informational; feature probes are authoritative) ---
@@ -105,7 +106,6 @@ ARCH=$(detect_arch)
 ver2num() { awk -F. '{printf "%d", ($1*1000000)+($2*1000)+$3}' <<< "${1}"; }
 
 declare -a FAILED_CRIT=()
-declare -a FAILED_ADV=()
 declare -a ADV_DETAIL=()
 PROBE_VER=""
 
@@ -129,7 +129,7 @@ probe_bin() {
     local db="$TMPD/probe_$(basename "$bin" | tr -c 'A-Za-z0-9' '_').db"
     rm -f "$db" "$db-wal" "$db-shm"
 
-    FAILED_CRIT=(); FAILED_ADV=(); ADV_DETAIL=(); PROBE_VER=""
+    FAILED_CRIT=(); ADV_DETAIL=(); PROBE_VER=""
     local ver out
 
     # --- 0. Executable? ---
@@ -232,13 +232,8 @@ report_bin() {
     if [[ ${#FAILED_CRIT[@]} -gt 0 ]]; then
         for f in "${FAILED_CRIT[@]}"; do printf '  %s✗ [critical]%s %s\n' "$C_R" "$C_0" "$f"; done
         printf '  %s✗ incompatible%s\n' "$C_R" "$C_0"
-    elif [[ ${#FAILED_ADV[@]} -gt 0 ]]; then
-        printf '  %s✓ all critical checks passed (with advisory notices)%s\n' "$C_G" "$C_0"
     else
         printf '  %s✓ all checks passed%s\n' "$C_G" "$C_0"
-    fi
-    if [[ ${#FAILED_ADV[@]} -gt 0 ]]; then
-        for f in "${FAILED_ADV[@]}"; do printf '  %s! [advisory]%s %s\n' "$C_Y" "$C_0" "$f"; done
     fi
     if [[ $VERBOSE -eq 1 && ${#ADV_DETAIL[@]} -gt 0 ]]; then
         for d in "${ADV_DETAIL[@]}"; do printf '%s      raw: %s%s\n' "$C_D" "$d" "$C_0"; done
@@ -257,11 +252,17 @@ printf '%shost arch: %s   script dir: %s   minimum version: %s%s\n' "$C_D" "$(un
 echo
 
 BUNDLED=""
+BUNDLED_IN_REPO=0
 if [[ -n "$ARCH" ]]; then
     # Repo layout is bundled/sqlite3-<arch>; the installer flattens it to
-    # sqlite3-<arch> inside the vifm scripts directory.
+    # sqlite3-<arch> inside the vifm scripts directory. Only the flattened
+    # install copy may be deleted; a binary inside the source tree is tracked
+    # project data and must never be removed by a self-check.
     BUNDLED="$SCRIPT_DIR/sqlite3-$ARCH"
-    [[ -e "$BUNDLED" ]] || BUNDLED="$SCRIPT_DIR/../bundled/sqlite3-$ARCH"
+    if [[ ! -e "$BUNDLED" ]]; then
+        BUNDLED="$SCRIPT_DIR/../bundled/sqlite3-$ARCH"
+        BUNDLED_IN_REPO=1
+    fi
 fi
 
 # --- 1. Probe bundled ---
@@ -271,7 +272,10 @@ if [[ -n "$BUNDLED" && -e "$BUNDLED" ]]; then
     report_bin "$BUNDLED" "bundled static binary"
 
     if [[ $BUNDLED_OK -ne 0 ]]; then
-        if [[ $DRY_RUN -eq 1 ]]; then
+        if [[ $BUNDLED_IN_REPO -eq 1 ]]; then
+            printf '%s! incompatible bundled binary in the source tree: %s%s\n' "$C_Y" "$C_0" "$BUNDLED"
+            printf '  %snot deleted (tracked file); reinstall or replace it manually%s\n\n' "$C_D" "$C_0"
+        elif [[ $DRY_RUN -eq 1 ]]; then
             printf '%s[dry-run]%s would delete incompatible binary: %s\n\n' "$C_Y" "$C_0" "$BUNDLED"
             NEED_DELETE=1
         elif rm -f "$BUNDLED"; then
@@ -299,9 +303,11 @@ fi
 
 # --- 3. Also probe bundled binaries for other architectures (read-only, never deleted) ---
 if [[ $PROBE_ALL -eq 1 ]]; then
-    for f in "$SCRIPT_DIR"/sqlite3-* "$SCRIPT_DIR"/bundled/sqlite3-*; do
+    # Source layout keeps bundled binaries one level up; install layout flattens
+    # them into SCRIPT_DIR. Probe both without duplicating the same file.
+    for f in "$SCRIPT_DIR"/sqlite3-* "$SCRIPT_DIR"/bundled/sqlite3-* "$SCRIPT_DIR"/../bundled/sqlite3-*; do
         [[ -e "$f" ]] || continue
-        [[ -n "$BUNDLED" && "$f" == "$BUNDLED" ]] && continue
+        [[ -n "$BUNDLED" && "$f" -ef "$BUNDLED" ]] && continue
         printf '%s-- additional probe (other architecture, read-only, never deleted): %s%s\n' "$C_D" "$(basename "$f")" "$C_0"
         probe_bin "$f"
         report_bin "$f" "$(basename "$f")"
@@ -318,7 +324,14 @@ fi
 # and abbreviating the list too early (degraded display, not broken functionality).
 # If awk points to mawk on this machine, installing gawk is recommended.
 AWK_BIN=$(command -v awk 2>/dev/null)
-if [[ -n "$AWK_BIN" ]] && ! LC_ALL=en_US.UTF-8 awk 'BEGIN { exit !(split("中", a, "") == 1) }' 2>/dev/null; then
+# Try common UTF-8 locale names; a minimal system may only ship C.UTF-8.
+UTF8_LOCALE=""
+for loc in C.UTF-8 C.utf8 en_US.UTF-8; do
+    if LC_ALL="$loc" awk 'BEGIN { exit !(split("中", a, "") == 1) }' 2>/dev/null; then
+        UTF8_LOCALE="$loc"; break
+    fi
+done
+if [[ -n "$AWK_BIN" && -z "$UTF8_LOCALE" ]]; then
     printf '%s! [advisory]%s awk is not UTF-8 aware (mawk?): %s\n' "$C_Y" "$C_0" "$AWK_BIN"
     printf '         CJK path widths are counted in bytes (3x); the list abbreviates early. Recommended: install gawk\n\n'
 fi
@@ -354,6 +367,11 @@ if [[ -n "$EFFECTIVE" ]]; then
     else
         printf '  %s! cannot write cache (still usable, but each call probes again): %s%s\n' "$C_Y" "$CACHE" "$C_0"
     fi
+elif [[ -e "$CACHE" ]]; then
+    # No usable sqlite3: drop a stale cache so the next run re-probes instead of
+    # trusting a binary that may have been removed or downgraded.
+    rm -f "$CACHE" 2>/dev/null || true
+    printf '  %sremoved stale cache: %s%s\n' "$C_D" "$CACHE" "$C_0"
 fi
 
 [[ $NEED_DELETE -eq 1 ]] && FINAL=2

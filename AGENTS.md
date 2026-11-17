@@ -12,7 +12,9 @@ Different models and tools may resume this repository. Read in this order:
 2. `docs/STATE.md` — current status, what was actually verified, and the next step.
 3. `docs/TASKS.md` — queued work and task-specific acceptance criteria.
 4. `docs/ACCEPTANCE.md` and `docs/REGRESSION.md` — done criteria and area checks.
-5. `.harness-local/WORKFLOW.md` when present — private workstation workflow; never commit it.
+5. `.harness-local/WORKFLOW.md` and `.harness-local/DESIGN-PROPOSAL.md` when
+   present — private workstation workflow and design notes; never commit them.
+   Tracked docs and code are authoritative if a private note is outdated.
 
 `docs/STATE.md` is the single source of truth for progress. At the end of every
 substantive task, update it with the status, files or commits, checks actually
