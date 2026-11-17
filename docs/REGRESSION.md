@@ -235,7 +235,10 @@ picker and check:
    program owns the terminal/popup and renders its content (verify the file
    text appears on screen). On viewer exit fzf resumes **untouched** — same
    query, list, and scroll position — for another selection. A directory opens
-   in `view`'s netrw browser (or `eza -la` / `ls -la` fallback).
+   in `view`'s netrw browser (or `eza -la` / `ls -la` fallback). In a tmux
+   popup with fzf >= 0.58, a rounded border should stay visible around the
+   viewer; after the picker closes, `popup-border-lines` should match its
+   previous value.
 4. The viewer command for `v` is `FRECENCY_VIEWER` if set and its binary
    exists, otherwise `view`, then `$PAGER`, then `less -R`, then `cat`. `view`
    is preferred for syntax highlighting. Confirm the chain with stubs on an

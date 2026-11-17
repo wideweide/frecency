@@ -1,6 +1,6 @@
 # Project state
 
-Last updated: 2026-11-16
+Last updated: 2026-11-17
 Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
@@ -9,13 +9,14 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
   `origin/main`. The untracked `2026-11-16/` review notes are intentionally not
   committed. DLT `docs/frecency.md` synced in `9be0ed7`.
 - Active task: none.
-- Last code change: added Bash/fish `jc`/`je` helpers and NORMAL-mode fzf
-  `c`/`v`/`e` (exit, no navigation) plus `C`/`V`/`E` (stay, tmux window when
-  available); removed the obsolete `C` cleanup binding.
+- Last code change: fzf NORMAL-mode `v` now keeps a rounded tmux popup border
+  visible while the viewer runs, using fzf 0.58+ `border-native` with a
+  temporarily rounded `popup-border-lines` (restored on exit). Older fzf keeps
+  the self-drawn border; non-tmux is unchanged. README updated.
 - Next action: no queued task; see [`TASKS.md`](TASKS.md) for remaining manual
-  host and interactive checks. Local runtime was refreshed with
-  `install.sh --register` and installed files match the source. DLT
-  `docs/frecency.md` was updated to match the current behavior.
+  host and interactive checks. The local runtime was NOT refreshed after this
+  change; run `./install.sh --register` to pick it up. The tmux popup border
+  still needs a real terminal render check.
 - Blockers: none.
 
 ## What was verified
@@ -41,6 +42,9 @@ change; record the actual commands and results here.
 | fzf keys | pty: `c` copies the path, fzf stays open, footer shows `copied <path>` including verbatim special characters (`)`, `,`, `+`, backslash); `q` then exits with no path emitted | pass (one machine, non-tmux) |
 | fzf keys | pty: `v` shows program content then fzf resumes with query/list/scroll intact; `e` shows content then aborts with empty output and unchanged `$PWD` | pass (one machine, non-tmux) |
 | fzf keys | viewer chain: `view` preferred (stub), `FRECENCY_VIEWER='less -R'` override honored; directory opens in netrw via `view` | pass |
+| fzf keys | stub fzf: fzf 0.72 emits `--tmux 90%,80%,border-native` without `--border=rounded`; fzf 0.48 falls back to `--tmux 90%,80%` plus `--border=rounded` | pass |
+| fzf keys | stub tmux: entering the UI sets `popup-border-lines rounded`; the RETURN trap restores the saved `single` value | pass |
+| fzf keys | real tmux popup render: rounded border stays visible while `v` viewer owns the popup | not run (tmux client repeatedly exited unexpectedly in this container; relied on fzf 0.58 changelog, which documents `border-native` for programs started inside the popup) |
 | fzf keys | tmux 3.x `new-window` from `edit-stay` inherits `EDITOR`/`FRECENCY_VIEWER` and creates a new window | pass |
 | Shell helpers | `jc`/`je` in Bash and fish with stub `wl-copy`/`vim`: path copied without newline, `vim -- <path>` called, `$PWD` unchanged | pass |
 | Self-check | `HOME=<disposable> scripts/frecency-test` | pass; bundled 3.46.1 and system 3.45.1 |
@@ -49,6 +53,12 @@ change; record the actual commands and results here.
 
 ## Recent changes
 
+- 2026-11-17: fzf `v` preview keeps a rounded border in tmux popups. For fzf
+  >= 0.58 the picker uses `--tmux 90%,80%,border-native`, temporarily sets
+  `popup-border-lines rounded` for a fzf-like look, and restores the previous
+  value on exit, so the border drawn by tmux stays while `view`/pager owns the
+  popup. fzf < 0.58 keeps the prior self-drawn `--border=rounded`; non-tmux is
+  unchanged. `README.md` updated.
 - 2026-11-16: added Bash/fish `jc` (copy selected file path via `wl-copy`,
   no trailing newline) and `je` (edit with `vim -- <path>`); `j`/`ji`/`J` now
   return 0 on an empty fzf result so aborts stay silent.
@@ -99,5 +109,6 @@ change; record the actual commands and results here.
   end-to-end tests; see the "Not covered" section of `REGRESSION.md`.
 - `ji` and the NORMAL-mode `c`/`v`/`e` actions (and uppercase variants) still
   need an interactive pass on the maintainer's own terminal/tmux setup; the
-  recorded pty checks were run on one machine only.
+  recorded pty checks were run on one machine only. The rounded tmux popup
+  border around `v` previews likewise needs a real terminal render check.
 - There is no supported CLI command to reset or list all entries for a topic.

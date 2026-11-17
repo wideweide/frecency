@@ -126,7 +126,8 @@ only ticks on real navigation events, not on wall time).
 - bash 4.4+
 - sqlite3 >= 3.35 built with `SQLITE_ENABLE_MATH_FUNCTIONS` (for `exp()`);
   static fallback binaries for x86_64 / aarch64 are bundled
-- fzf >= 0.48 (`--accept-nth` / `change-footer` / `rebind`)
+- fzf >= 0.48 (`--accept-nth` / `change-footer` / `rebind`); fzf >= 0.58 keeps
+  the rounded border visible around `v` previews inside tmux popups
 - file (MIME detection for previews), flock (util-linux, migration locking)
 - gawk recommended (mawk counts CJK paths in bytes and abbreviates too early)
 - optional: view / eza / bat / highlight (view is the default file viewer and
@@ -243,12 +244,15 @@ Inside the frecency fzf UI (NORMAL mode; these keys only filter text in SEARCH m
 | `u` | undo last delete |
 | `s` | toggle ordered / any-order multi-word matching |
 | `c` | copy the selected path (no trailing newline); footer shows `copied <path>` and fzf stays |
-| `v` | preview in the picker: `view` (syntax highlighting, netrw for directories) → `$PAGER` → `less -R` → `cat`, override with `FRECENCY_VIEWER`; `q` returns to fzf with the query and scroll position intact |
+| `v` | preview in the picker: `view` (syntax highlighting, netrw for directories) → `$PAGER` → `less -R` → `cat`, override with `FRECENCY_VIEWER`; `q` returns to fzf with the query and scroll position intact; in a tmux popup the rounded border stays visible during the preview (fzf >= 0.58) |
 | `e` | edit with `$EDITOR` (fallback `vi`) and exit fzf without emitting a path; inside tmux opens a new fullscreen window, otherwise runs in the current terminal |
 | `Enter` | jump (the only key that emits a path and can change the shell's directory) |
 
 `c` and `v` use fzf `execute`/`execute-silent`, which suspends the picker so the
-program owns the tmux popup or terminal and renders normally. The copied-path
+program owns the tmux popup or terminal and renders normally. In a tmux popup,
+fzf >= 0.58 draws the border through tmux (rounded, matching fzf's style) so it
+stays visible while the `v` viewer runs; older fzf loses its self-drawn border
+during `execute`. The copied-path
 footer makes repeated copies unambiguous when switching between entries. `v`
 restores the picker untouched on exit, so you can walk through filtered
 entries one by one. `e` runs the editor and then aborts fzf **without emitting
