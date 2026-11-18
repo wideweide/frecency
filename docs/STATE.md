@@ -107,9 +107,22 @@ change; record the actual commands and results here.
 | Test suite | `bash tests/run-tests.sh`: 20 CLI cases pass locally (incl. with `SHELLCHECK=<0.10.0 binary>`); 0 failed | pass |
 | Shellcheck | shellcheck 0.10.0 `-S warning` clean on all 6 bash scripts after fixes | pass |
 | CI workflow | `.github/workflows/ci.yml` syntax reviewed locally (YAML + step commands executed by hand); first run happens on push | pass (manual equivalence) |
+| CI run | run for `a7ebf6e` on GitHub Actions: bash -n + fish -n + shellcheck + test suite all green | pass |
+| dir.db repair | readonly `integrity_check` before: `row 6 missing from index sqlite_autoindex_entries_1`; verified `.backup` taken; after `REINDEX entries`: `ok`, counts identical to backup | pass |
 
 ## Recent changes
 
+- 2026-11-19: repaired the legacy `dir.db` index corruption: `PRAGMA
+  integrity_check` reported `row 6 missing from index
+  sqlite_autoindex_entries_1` (pre-existing, first noted during the 2026-11-18
+  backup verification). Took a verified sqlite `.backup` first, then
+  `REINDEX entries` on the live database: integrity_check now returns `ok`,
+  and row counts, bookmark counts, trash counts, and the event clock are
+  identical to the backup (669/16/46/1051). Local data maintenance only; no
+  code change. The same day, CI was made green: the shellcheck step failed on
+  the first run because a plain YAML scalar folded the backslash-newline
+  continuations into an escaped space, handing shellcheck a path with a
+  leading space; the step now uses a block scalar and passes.
 - 2026-11-18: removed the score-floor cleanup mechanism introduced earlier the
   same day. Rationale (from the jghub fzf#4789 discussion, recorded as a
   decision in the private workflow log): a score is an ordinal — its absolute
