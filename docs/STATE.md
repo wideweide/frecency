@@ -5,8 +5,8 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
 
-- Branch: `main`; last code commit `67af3fd` (2026-11-18). Use `git status`
-  and `git log` for the authoritative current state.
+- Branch: `main`. Use `git status -sb` and `git log --oneline -5` for the
+  authoritative commit and working-tree state; no commit hash is recorded here.
 - Active task: none; the score-floor task below is implemented but uncommitted.
 - Last code change: two-stage maintenance. `MIN_SCORE_UNIFIED=0.01`,
   `MIN_SCORE_DIR=0.05`, `MIN_SCORE_FILE=0.05` (`0` disables) drive a new
@@ -248,7 +248,9 @@ change; record the actual commands and results here.
 4. Run the relevant gates in [`ACCEPTANCE.md`](ACCEPTANCE.md) and
    [`REGRESSION.md`](REGRESSION.md).
 5. Update this file and `TASKS.md` at the end of the task, then commit code,
-   docs, and state together.
+   docs, and state together. Do not record commit hashes in this file: a hash
+   can only name the previous commit, which forces an extra docs-only commit
+   to keep it current.
 6. Keep private decisions, local paths, and machine-specific commands in
    `.harness-local/WORKFLOW.md`.
 
