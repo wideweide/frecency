@@ -7,13 +7,15 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 - Branch: `main`. Use `git status -sb` and `git log --oneline -5` for the
   authoritative commit and working-tree state; no commit hash is recorded here.
-- Active task: none; the score-floor task below is implemented but uncommitted.
-- Last code change: two-stage maintenance. `MIN_SCORE_UNIFIED=0.01`,
-  `MIN_SCORE_DIR=0.05`, `MIN_SCORE_FILE=0.05` (`0` disables) drive a new
-  `_prune_low_score()` that deletes unbookmarked rows below their current aligned
-  score; it runs before the existing capacity prune after each write and in
-  `cleanup`. λ stays static. `README.md`, `docs/REGRESSION.md`, and DLT
-  `docs/frecency.md` were synced.
+- Active task: none.
+- Last code change: the score-floor cleanup mechanism was removed (decision
+  recorded in the private workflow log). `_prune_low_score()`,
+  `_min_score_for_dest()`, and the `MIN_SCORE_UNIFIED/_DIR/_FILE` config were
+  deleted; maintenance is capacity-based only (`MAX_ENTRIES` -> 90% trim,
+  bookmarks and the just-written entry protected). A score is an ordinal for
+  ranking and capacity-trim ordering, never a retention test. `README.md`,
+  `docs/REGRESSION.md` (section rewritten as a "no score-threshold cleanup"
+  invariant), and DLT `docs/frecency.md` were synced.
 - Previous code change: NORMAL-mode keys are now `y` (copy, Vim yank habit) and
   `g` (open the selected entry's git repository in the first available
   `gitui`/`ziggity`/`lazygit` in a new tmux window, then exit fzf). `g:first`
@@ -99,9 +101,25 @@ change; record the actual commands and results here.
 | Real data | one `cleanup` pass per logical topic: nonbook -> `180`/`81`/`49`, below-floor -> `0`/`0`/`0`, bookmarks `13`/`11`/`2` unchanged | pass |
 | Real data | backup vs live: 0 bookmarks lost, 0 unexpected rows, event clocks and undo tables unchanged, live `PRAGMA integrity_check` ok | pass |
 | Background cleanup | source, pushed HEAD and installed copy all show `do_cleanup()` starting with `_prune_low_score()`; `RANDOM % 200 == 0` sampled `97/20000` (~0.5%) | pass |
+| Floor removal | `grep -rn "MIN_SCORE\|min_score\|_prune_low_score"` over all scripts and README returns nothing; `bash -n` (6 scripts) + `fish -n` + `git diff --check` pass | pass |
+| Floor removal | disposable HOME: rows at tick 1 with meta tick 1000000 (score ~0) plus live and bookmark rows all survive `frecency file cleanup` (rc 0, 3 rows) | pass |
 
 ## Recent changes
 
+- 2026-11-18: removed the score-floor cleanup mechanism introduced earlier the
+  same day. Rationale (from the jghub fzf#4789 discussion, recorded as a
+  decision in the private workflow log): a score is an ordinal — its absolute
+  size has no meaning across usage patterns, so a score threshold is an
+  implicit, unpredictable stand-in for the real decision variable
+  (`MAX_ENTRIES`); low-score entries ("rarely visited", e.g. an important
+  rarely-touched config file) must stay reachable. `_prune_low_score()`,
+  `_min_score_for_dest()`, and the `MIN_SCORE_*` config keys were deleted;
+  the shared-limits loader and both cleanup call sites were reduced to the
+  capacity prune. Note the floor had already run once on the real database
+  before this removal (see the real-data entry below; the removed rows are in
+  that verified backup). `README.md` and `docs/REGRESSION.md` were rewritten
+  (the score-floor checks became a "no score-threshold cleanup" invariant),
+  and DLT `docs/frecency.md` was synced.
 - 2026-11-18: raised the low-frequency background cleanup chance from `1/1000`
   to `1/200` (~0.5%, roughly once every few days of normal use) and updated its
   comment. Verified against source, pushed HEAD and the installed copy that

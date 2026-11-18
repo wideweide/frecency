@@ -98,11 +98,14 @@ pruning (with the seeded rows above, the counts should be `91|181|271|1`:
 entries, directories, files, and the surviving bookmark), and the newly written
 entry survives. `MAX_ENTRIES=0` disables automatic pruning for that table.
 
-## Score cleanup
+## No score-threshold cleanup
 
-Use a fresh disposable home; never run these probes on a real database. Score
-pruning uses each table's own aligned score and runs before the capacity check,
-after writes and in `cleanup`. Rows with a keyword are never deleted.
+Use a fresh disposable home; never run these probes on a real database.
+Maintenance is capacity-based only (`MAX_ENTRIES`): there is deliberately no
+score or wall-clock threshold that deletes rows. A score is an ordinal for
+ranking and for choosing which rows a capacity trim removes; a tiny score means
+"rarely visited", not "dead", so low-scoring rows must survive cleanup while
+the table is under its limit. Rows with a keyword are never deleted.
 
 ```bash
 test_home=$(mktemp -d)
@@ -111,32 +114,21 @@ printf '%s\n' 'IGNORE_PATTERNS=()' > "$test_home/.local/share/frecency/file.conf
 HOME="$test_home" scripts/frecency file init
 sqlite_bin=$(cat "$test_home/.local/share/frecency/.sqlite3.bin")
 "$sqlite_bin" "$test_home/.local/share/frecency/file.db" <<'SQL'
-WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 100)
 INSERT INTO entries (content, keyword, score, visits, tick, last_access)
-SELECT '/dead/' || i, '', 1.0, 1, 1, CURRENT_TIMESTAMP FROM n;
-INSERT INTO entries (content, keyword, score, visits, tick, last_access)
-VALUES ('/live/', '', 1000.0, 1, 1, CURRENT_TIMESTAMP),
+VALUES ('/dying/', '', 1.0, 1, 1, CURRENT_TIMESTAMP),
+       ('/live/', '', 1000.0, 1, 1, CURRENT_TIMESTAMP),
        ('/bookmark/', 'tag', 1.0, 1, 1, CURRENT_TIMESTAMP);
-UPDATE meta SET v = '1000' WHERE k = 'tick';
+UPDATE meta SET v = '1000000' WHERE k = 'tick';
 SQL
-HOME="$test_home" scripts/frecency file add --route unified "$test_home/new"
+HOME="$test_home" scripts/frecency file cleanup
 "$sqlite_bin" "$test_home/.local/share/frecency/file.db" \
-  "SELECT (SELECT count(*) FROM entries WHERE content LIKE '/dead/%'),
-          (SELECT count(*) FROM entries WHERE content = '/live/'),
-          (SELECT count(*) FROM entries WHERE content = '/bookmark/'),
-          (SELECT count(*) FROM entries WHERE content = '$test_home/new');"
+  "SELECT content FROM entries ORDER BY content;"
 ```
 
-Expected: `0|1|1|1` — dead rows are removed, the live row and bookmark survive,
-and the just-written entry is protected from its own cleanup.
-
-For per-table floors, put `MIN_SCORE_UNIFIED=0.01`, `MIN_SCORE_DIR=0.05`, and
-`MIN_SCORE_FILE=0.05` in `file.config`, seed rows whose current score falls
-between 0.01 and 0.05 (`exp(-0.01 * (T_now - tick))` for the split tables), then
-run `frecency file_dir cleanup` and `frecency file_file cleanup`. The split
-topics must read the floors from `file.config` and delete those rows even though
-the unified 0.01 floor would keep them. `MIN_SCORE_*=0` disables score pruning;
-a non-numeric value is treated as `0`.
+Expected: all three rows survive. `/dying/` has a current score of effectively
+zero after one million ticks, yet nothing may delete it while the table is far
+below its `MAX_ENTRIES` limit. `grep -rn "MIN_SCORE\|_prune_low_score"
+scripts/ README.md` must return nothing.
 
 ## UI curation and missing paths
 

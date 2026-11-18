@@ -372,9 +372,6 @@ MAX_ENTRIES=1500          # fallback capacity for each history table
 MAX_ENTRIES_UNIFIED=      # per-table override for the `entries` table
 MAX_ENTRIES_DIR=          # per-table override for `dir_entries`
 MAX_ENTRIES_FILE=         # per-table override for `file_entries`
-MIN_SCORE_UNIFIED=0.01    # current-score floor for `entries` (0 disables)
-MIN_SCORE_DIR=0.05        # current-score floor for `dir_entries` (0 disables)
-MIN_SCORE_FILE=0.05       # current-score floor for `file_entries` (0 disables)
 MAX_PATH_CHARS=60         # weighted display width before list paths abbreviate
 START_MODE=search         # 'search' starts with prompt ready, 'normal' with Vim keys
 START_DATA=all            # 'all' loads everything, 'last' only the LAST_LIMIT recent entries
@@ -391,21 +388,20 @@ counts file events; `file_dir`, `file_file`, and other topics default to
 `0.01`. A `LAMBDA` set in a topic config overrides the default for every
 destination that topic writes.
 
-Maintenance has two stages, run after every write and by
-`frecency <topic> cleanup`: first, unbookmarked entries whose **current** score
-(aligned to that table's own event clock) is below the destination's
-`MIN_SCORE` are deleted; then the table is capped at its `MAX_ENTRIES` limit by
-removing the lowest-scoring entries down to 90% of the limit. The score floor is
-an active trim; the capacity cap is a hard backstop, so both are kept. Bookmarked
-entries are never counted or removed, and on writes the entry just written is
-protected from both stages. The three tables share `file.db`, so put the
-per-table limits and score floors in `~/.local/share/frecency/file.config`;
-empty limits fall back to `MAX_ENTRIES` and empty floors use the defaults above.
-Set a limit or floor to `0` to disable that stage for the table. `LAMBDA` stays
-static per table; tune `MIN_SCORE`, not `LAMBDA`, if you want less or more
-aggressive pruning. A low-probability background pass (about 1 in 200 writes)
-runs the same `cleanup` as a safety net for concurrent writers, using the same
-score-then-capacity order.
+Maintenance is capacity-based only, run after every write and by
+`frecency <topic> cleanup`: when a table exceeds its `MAX_ENTRIES` limit it is
+trimmed by removing the lowest-scoring entries down to 90% of the limit. There
+is deliberately **no score threshold**: a score is an ordinal used for ranking
+and for choosing which rows a capacity trim removes, never a retention test —
+a tiny score only means "rarely visited", not "dead", and such entries stay
+reachable through specific queries and the picker. Bookmarked entries are never
+counted or removed, and on writes the entry just written is protected. The
+three tables share `file.db`, so put the per-table limits in
+`~/.local/share/frecency/file.config`; empty limits fall back to `MAX_ENTRIES`.
+Set a limit to `0` to disable pruning for that table. `LAMBDA` stays static per
+table; tune `MAX_ENTRIES`, not `LAMBDA`, if you want less or more retention. A
+low-probability background pass (about 1 in 200 writes) runs the same `cleanup`
+as a safety net for concurrent writers.
 
 Legacy entries remain in unified `entries` after upgrade. Split histories start
 accumulating when those directories and files are next visited or opened; the
@@ -456,9 +452,9 @@ topic. Do not discard or replace an existing user database to upgrade the
 program.
 
 Use `frecency file query` to inspect and search the `file` history. Replace
-`file` with another topic name for that topic. `frecency <topic> cleanup` prunes
-unbookmarked entries below that topic's score floor and above its capacity
-limit; bookmarked entries are retained. Individual entries can be deleted
+`file` with another topic name for that topic. `frecency <topic> cleanup`
+prunes unbookmarked entries above the table's capacity limit; bookmarked
+entries are retained. Individual entries can be deleted
 with `frecency <topic> remove <content>` or from the UI with undo available.
 There is currently no supported command to reset or list all entries for a
 topic in the CLI. Do not delete a database file as a reset shortcut; that can
@@ -486,7 +482,7 @@ frecency <topic> jump-handler [--picker] [--emit=path] [term]
 frecency <topic> jump-handler-vifm [term]   # same, vifm flavour (goto)
 frecency <topic> remove <content>           # delete (undoable in the UI)
 frecency <topic> recent <seconds> [content] # exit 0 if content (or anything) changed recently
-frecency <topic> cleanup                    # prune below score floor / above capacity
+frecency <topic> cleanup                    # capacity prune (90% of MAX_ENTRIES)
 ```
 
 For the shared `file.db`, logical topics `file`, `file_dir`, and `file_file`
