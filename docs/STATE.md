@@ -5,7 +5,7 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
 
-- Branch: `main`; last code commit `e28fd62` (2026-11-18). Use `git status`
+- Branch: `main`; last code commit `67af3fd` (2026-11-18). Use `git status`
   and `git log` for the authoritative current state.
 - Active task: none; the score-floor task below is implemented but uncommitted.
 - Last code change: two-stage maintenance. `MIN_SCORE_UNIFIED=0.01`,
