@@ -5,8 +5,8 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
 
-- Branch: `main`; HEAD `969793e` (2026-11-17), in sync with `origin/main`;
-  the fzf footer fixes below are uncommitted in the working tree.
+- Branch: `main`; last code commit `9262ab3` (2026-11-18). Use `git status`
+  and `git log` for the authoritative current state.
 - Active task: none.
 - Last code change: fzf footer is now mode-aware and no longer overwritten by
   the startup transform. SEARCH shows only `Esc Normal  ? Help`; NORMAL shows
@@ -21,8 +21,8 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
   single row (empirically 50 rows -> 1); now uses `$(( 10#... ))` arithmetic.
   (2) `do_jump_handler` still had 3 unquoted `$SELF` calls, so `j`/`ji`/`J`/`o`
   broke (rc 127) under a space-containing install path; now `"$SELF"`.
-- Next action: commit the pending fzf footer/README changes; see
-  [`TASKS.md`](TASKS.md) for the queued manual host and interactive checks.
+- Next action: none queued; see [`TASKS.md`](TASKS.md) for the remaining
+  manual host and interactive checks.
 - Blockers: none.
 
 ## What was verified
