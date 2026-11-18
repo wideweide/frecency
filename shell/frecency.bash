@@ -42,7 +42,7 @@ __frecency_emit_path() {
 o() {
     if (( $# == 1 )); then
         if [[ -d "$1" ]]; then
-            cd -- "$1"
+            cd -- "$1" || return
             return
         fi
         if [[ -f "$1" ]]; then
@@ -54,7 +54,7 @@ o() {
     sel=$(frecency file jump-handler --emit=path "$@") || return
     [[ -z "$sel" ]] && return 0
     if [[ -d "$sel" ]]; then
-        cd -- "$sel"
+        cd -- "$sel" || return
     else
         __frecency_emit_path "$sel"
     fi
@@ -62,16 +62,16 @@ o() {
 
 j() {
     if (( $# == 0 )); then
-        cd -- "$HOME"
+        cd -- "$HOME" || return
         return
     fi
     if (( $# == 1 )); then
         if [[ "$1" == "-" ]]; then
-            cd -
+            cd - || return
             return
         fi
         if [[ -d "$1" ]]; then
-            cd -- "$1"
+            cd -- "$1" || return
             return
         fi
     fi

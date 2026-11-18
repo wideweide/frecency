@@ -12,6 +12,8 @@ checklist is [`REGRESSION.md`](REGRESSION.md).
       details changed: update `README.md` in the same change.
 - [ ] Shell changes: run `bash -n` on every affected Bash script and
       `fish -n` on the fish integration.
+- [ ] `bash tests/run-tests.sh` passes (runs the CLI regression suite and
+      shellcheck when installed; CI runs both on every push).
 - [ ] CLI or installer changes: use the existing `--dry-run`, self-check, or a
       disposable-`HOME` probe. Do not test migrations on a real database.
 - [ ] Run the relevant sections of `REGRESSION.md`, or report exactly which
@@ -28,7 +30,7 @@ checklist is [`REGRESSION.md`](REGRESSION.md).
 | Area | Minimum verification |
 |---|---|
 | Shell integration (`shell/`) | `bash -n` / `fish -n`; disposable-`HOME` probes for changed functions; `install.sh --dry-run --register` |
-| CLI, routing, scoring (`scripts/frecency`) | disposable-`HOME` probe; exact SQL/score checks for scoring; no-match and route behavior; `bash -n` |
+| CLI, routing, scoring (`scripts/frecency`) | `bash tests/run-tests.sh`; disposable-`HOME` probe for anything the suite does not cover (interactive UI, host events); `bash -n` |
 | Installer (`install.sh`) | `--dry-run --register` and `--dry-run --uninstall`; run the real install only when requested, then verify installed files match the source |
 | Documentation only | Check links and examples against the current implementation; `git diff --check` |
 | Schema or migration | Initialize twice on a disposable `HOME`; use the old-schema fixtures in `REGRESSION.md` |

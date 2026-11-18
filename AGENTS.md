@@ -30,6 +30,7 @@ full gates. Use a disposable `HOME` for database and CLI probes.
 ```bash
 bash -n scripts/frecency scripts/frecency-test scripts/bmark.sh scripts/open_git_repo.sh shell/frecency.bash install.sh
 fish -n shell/frecency.fish
+tests/run-tests.sh                    # CLI regression suite + shellcheck (when installed); CI runs these too
 scripts/frecency-test                 # SQLite/fzf dependency self-check (writes the sqlite cache)
 ./install.sh --dry-run --register     # preview install and registration
 ./install.sh --register               # refresh the local runtime only when requested
@@ -45,6 +46,8 @@ git diff --check
   entry's repository in gitui/ziggity/lazygit.
 - `install.sh`: installation, registration, dry-run, and uninstall behavior.
 - `frecency.vifm`, `shell/`, `nvim/`: integrations.
+- `tests/run-tests.sh`: CLI regression suite (disposable `HOME` per case);
+  also run by CI together with `bash -n`, `fish -n`, and shellcheck.
 - `bundled/`: static SQLite fallback binaries; preserve executable bits.
 - `README.md`: user-facing overview and supported commands/configuration.
 - `docs/STATE.md`, `docs/TASKS.md`: agent handoff state and queued work.
@@ -62,7 +65,7 @@ git diff --check
 
 ## Verification
 
-For a shell script change, run `bash -n` on each affected Bash script. For installer or CLI behavior, use its existing dry-run or self-check modes where suitable. For documentation-only changes, check links and command examples against the current implementation. Record the exact checks and results in `docs/STATE.md`; do not claim broader validation than performed.
+For a shell script change, run `bash -n` on each affected Bash script and `tests/run-tests.sh` (shellcheck is part of the suite when installed; CI enforces it with `-S warning`). For installer or CLI behavior, use its existing dry-run or self-check modes where suitable. For documentation-only changes, check links and command examples against the current implementation. Record the exact checks and results in `docs/STATE.md`; do not claim broader validation than performed.
 
 ## Local harness configuration
 

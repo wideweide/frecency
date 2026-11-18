@@ -3,6 +3,13 @@
 Project-wide acceptance gates are in [`ACCEPTANCE.md`](ACCEPTANCE.md); record
 the checks you actually ran in [`STATE.md`](STATE.md).
 
+The CLI behaviors that used to be manual probes here are automated in
+`tests/run-tests.sh` (capacity math, write-protocol rejection, config
+validation, shared limits, undo, jump-handler, escaping, the no-score-threshold
+invariant) and run in CI together with `bash -n`, `fish -n`, and shellcheck.
+Run `bash tests/run-tests.sh` first; the manual sections below cover what the
+suite cannot reach.
+
 Run these checks after changes to the matching area. Interactive UI checks need
 the supported fzf version and a terminal. Use a disposable home for database
 checks so the examples do not touch your normal history.
@@ -413,9 +420,9 @@ later checks. UI and host integration behavior still requires manual testing.
 
 - Automated end-to-end checks for Bash, fish, Vifm, and Neovim host event
   behavior are not currently provided; those integrations need manual host
-  testing.
+  testing. (`tests/run-tests.sh` covers CLI behavior only.)
 - The interactive `ji` picker and NORMAL-mode `y`/`v`/`e`/`g` actions need a real
-  terminal and are not exercised by the automated capacity/CLI commands.
+  terminal and are not exercised by the CLI test suite.
   (`C`/`V`/`E` are unbound.)
 - There is no supported command to reset a topic database or list its entries
   without the interactive query UI.

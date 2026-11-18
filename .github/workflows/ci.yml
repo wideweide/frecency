@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fish shellcheck
+
+      - name: Syntax gates
+        run: |
+          bash -n scripts/frecency scripts/frecency-test scripts/bmark.sh \
+            scripts/open_git_repo.sh install.sh shell/frecency.bash
+          fish -n shell/frecency.fish
+
+      - name: shellcheck
+        run: shellcheck -S warning \
+          scripts/frecency scripts/frecency-test scripts/bmark.sh \
+          scripts/open_git_repo.sh install.sh shell/frecency.bash
+
+      - name: Test suite
+        run: bash tests/run-tests.sh

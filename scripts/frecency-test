@@ -71,9 +71,9 @@ MIN_VER="3.35.0"
 
 # --- Colors (disabled when not a tty, suitable for vifm system() calls) ---
 if [[ -t 1 ]]; then
-    C_0=$'\e[0m'; C_B=$'\e[1m'; C_G=$'\e[32m'; C_Y=$'\e[33m'; C_R=$'\e[31m'; C_C=$'\e[36m'; C_D=$'\e[2m'
+    C_0=$'\e[0m'; C_B=$'\e[1m'; C_G=$'\e[32m'; C_Y=$'\e[33m'; C_R=$'\e[31m'; C_D=$'\e[2m'
 else
-    C_0=""; C_B=""; C_G=""; C_Y=""; C_R=""; C_C=""; C_D=""
+    C_0=""; C_B=""; C_G=""; C_Y=""; C_R=""; C_D=""
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -110,12 +110,12 @@ declare -a ADV_DETAIL=()
 PROBE_VER=""
 
 # Execute SQL (through stdin, so heredoc shell expansion cannot interfere)
-# Usage: run_sql <bin> <db> <sql> -> returns 0 on success and sets OUT / ERR
-OUT=""; ERR=""
+# Usage: run_sql <bin> <db> <sql> -> returns 0 on success and sets ERR
+ERR=""
 run_sql() {
     local bin="$1" db="$2" sql="$3"
     local errf="$TMPD/.err"
-    OUT=$(printf '%s\n' "$sql" | "$bin" -batch -list -init /dev/null "$db" 2>"$errf")
+    printf '%s\n' "$sql" | "$bin" -batch -list -init /dev/null "$db" > /dev/null 2>"$errf"
     local rc=$?
     ERR=$(tr -d '\r' < "$errf")
     [[ $rc -eq 0 && -z "$ERR" ]]
@@ -126,7 +126,8 @@ run_sql() {
 # ============================================================================
 probe_bin() {
     local bin="$1"
-    local db="$TMPD/probe_$(basename "$bin" | tr -c 'A-Za-z0-9' '_').db"
+    local db
+    db="$TMPD/probe_$(basename "$bin" | tr -c 'A-Za-z0-9' '_').db"
     rm -f "$db" "$db-wal" "$db-shm"
 
     FAILED_CRIT=(); ADV_DETAIL=(); PROBE_VER=""

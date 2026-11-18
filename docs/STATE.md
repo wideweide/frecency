@@ -8,14 +8,15 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 - Branch: `main`. Use `git status -sb` and `git log --oneline -5` for the
   authoritative commit and working-tree state; no commit hash is recorded here.
 - Active task: none.
-- Last code change: the score-floor cleanup mechanism was removed (decision
-  recorded in the private workflow log). `_prune_low_score()`,
-  `_min_score_for_dest()`, and the `MIN_SCORE_UNIFIED/_DIR/_FILE` config were
-  deleted; maintenance is capacity-based only (`MAX_ENTRIES` -> 90% trim,
-  bookmarks and the just-written entry protected). A score is an ordinal for
-  ranking and capacity-trim ordering, never a retention test. `README.md`,
-  `docs/REGRESSION.md` (section rewritten as a "no score-threshold cleanup"
-  invariant), and DLT `docs/frecency.md` were synced.
+- Last code change: added `tests/run-tests.sh` (20 CLI regression cases:
+  capacity math incl. leading-zero/`0`/fill-level, write-protocol rejection,
+  no-score-threshold invariant, config validation, shared per-table limits,
+  undo trim, unbook, remove+undo, recent validation, jump-handler, missing-path
+  preview, LIKE escaping) plus `.github/workflows/ci.yml` (bash -n, fish -n,
+  shellcheck `-S warning`, test suite on push/PR). Fixed every shellcheck
+  warning (~29: SC2155 splits, SC2209 quoting, dead SC2034 vars, SC2164 cd
+  guards); two intentional patterns carry disable directives (SC2053 config
+  glob, SC1090 config source).
 - Previous code change: NORMAL-mode keys are now `y` (copy, Vim yank habit) and
   `g` (open the selected entry's git repository in the first available
   `gitui`/`ziggity`/`lazygit` in a new tmux window, then exit fzf). `g:first`
@@ -103,6 +104,9 @@ change; record the actual commands and results here.
 | Background cleanup | source, pushed HEAD and installed copy all show `do_cleanup()` starting with `_prune_low_score()`; `RANDOM % 200 == 0` sampled `97/20000` (~0.5%) | pass |
 | Floor removal | `grep -rn "MIN_SCORE\|min_score\|_prune_low_score"` over all scripts and README returns nothing; `bash -n` (6 scripts) + `fish -n` + `git diff --check` pass | pass |
 | Floor removal | disposable HOME: rows at tick 1 with meta tick 1000000 (score ~0) plus live and bookmark rows all survive `frecency file cleanup` (rc 0, 3 rows) | pass |
+| Test suite | `bash tests/run-tests.sh`: 20 CLI cases pass locally (incl. with `SHELLCHECK=<0.10.0 binary>`); 0 failed | pass |
+| Shellcheck | shellcheck 0.10.0 `-S warning` clean on all 6 bash scripts after fixes | pass |
+| CI workflow | `.github/workflows/ci.yml` syntax reviewed locally (YAML + step commands executed by hand); first run happens on push | pass (manual equivalence) |
 
 ## Recent changes
 

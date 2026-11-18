@@ -696,8 +696,8 @@ ON CONFLICT(content) DO UPDATE SET
 
 do_add() {
     local content="" keyword="" route="unified"
-    [[ "$TOPIC" == "file_dir" ]] && route=dir
-    [[ "$TOPIC" == "file_file" ]] && route=file
+    [[ "$TOPIC" == "file_dir" ]] && route="dir"
+    [[ "$TOPIC" == "file_file" ]] && route="file"
     while (($#)); do
         case "$1" in
             --route)
@@ -719,6 +719,7 @@ do_add() {
     fi
 
     for pattern in "${IGNORE_PATTERNS[@]}"; do
+        # shellcheck disable=SC2053  # $pattern is an intentional glob from config
         [[ "$content" == $pattern ]] && return 0
     done
 
@@ -826,7 +827,8 @@ do_preview() {
         # Grade calculation: reproduce the ORDER BY CASE WHEN ladder with
         # FZF_QUERY (the current search term injected by fzf), so the preview grade
         # matches actual ordering. grade is NULL when GRADE_MODE != on or no query.
-        local cur_expr=$(_decay_expr)
+        local cur_expr
+        cur_expr=$(_decay_expr)
         local grade_col="NULL"
         local from_extra=""
         if [[ "${GRADE_MODE:-on}" == "on" && -n "${FZF_QUERY:-}" ]]; then
@@ -884,8 +886,9 @@ do_preview() {
                 && eza -a --color=always --icons --no-permissions --no-user --no-time --no-filesize -- "$content" | head -n 40 \
                 || ls -la --color=always -- "$content" | head -n 40
         else
-            local mime=$(file --mime-type -b -- "$content" 2>/dev/null)
-            local desc=$(file -b -- "$content" 2>/dev/null)
+            local mime desc
+            mime=$(file --mime-type -b -- "$content" 2>/dev/null)
+            desc=$(file -b -- "$content" 2>/dev/null)
             if [[ "$mime" == text/* || "$desc" == *"text"* || "$desc" == *"script"* ]]; then
                 printf '%s%s%s\n' "${C_GREEN}${C_BOLD}" "--- Text Preview ---" "$C_NORMAL"
                 _apply_highlight "$content" 100
@@ -902,16 +905,18 @@ do_preview() {
         printf '%s\n' "- Run: frecency $TOPIC remove <path>"
     else
         local cmd_name="${content%% *}"
-        local cmd_type=$(type -t "$cmd_name" 2>/dev/null)
+        local cmd_type
+        cmd_type=$(type -t "$cmd_name" 2>/dev/null)
         if [[ -n "$cmd_type" ]]; then
             printf '%s%s%s\n' "${C_GREEN}${C_BOLD}" "--- Command Info ---" "$C_NORMAL"
             printf 'Type: %s%s%s\n' "$C_CYAN" "$cmd_type" "$C_NORMAL"
             case "$cmd_type" in
                 alias) alias "$cmd_name" 2>/dev/null || type "$cmd_name" ;;
                 file)
-                    local real_path=$(which "$cmd_name" 2>/dev/null)
-                    printf 'Binary: %s%s%s\n----------------------\n' "$C_BLUE" "$real_path" "$C_NORMAL"
-                    local r_desc=$(file -b "$real_path" 2>/dev/null)
+                    local real_path r_desc
+                    real_path=$(which "$cmd_name" 2>/dev/null)
+                    printf '%s%s%s\n----------------------\n' "$C_BLUE" "$real_path" "$C_NORMAL"
+                    r_desc=$(file -b "$real_path" 2>/dev/null)
                     if [[ "$r_desc" == *"text"* || "$r_desc" == *"script"* ]]; then
                         printf '%s%s%s\n' "$C_BOLD" "Script Snippet:" "$C_NORMAL"; _apply_highlight "$real_path" 30
                     else
@@ -944,7 +949,7 @@ _do_internal_query() {
         # Ordered mode combines words into %foo%bar%; any-order mode still matches
         # word by word. Both require the whole query to hit one field, never half
         # path and half keyword.
-        local -a words=() conds=()
+        local -a words=()
         read -r -a words <<< "$term"
         local multiword_mode; multiword_mode=$(_current_multiword_mode)
         if [[ "$multiword_mode" == "ordered" ]]; then
@@ -1130,8 +1135,8 @@ do_unbook() {
 
 do_remove() {
     local route="unified" content="" dest old_table=$ENTRY_TABLE old_trash=$TRASH_TABLE old_tick=$TICK_KEY
-    [[ "$TOPIC" == "file_dir" ]] && route=dir
-    [[ "$TOPIC" == "file_file" ]] && route=file
+    [[ "$TOPIC" == "file_dir" ]] && route="dir"
+    [[ "$TOPIC" == "file_file" ]] && route="file"
     while (($#)); do
         case "$1" in
             --route) (($# >= 2)) || return 2; route="$2"; shift 2 ;;
@@ -1173,14 +1178,16 @@ do_query_ui() {
 
     local tmux_opt="" border_opt="--border=rounded" _tmux_border_saved=""
     if [[ -n "$TMUX" ]]; then
-        local _tmux_ver=$(tmux -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        local _tmux_ver
+        _tmux_ver=$(tmux -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
         if [[ -n "$_tmux_ver" ]] && awk "BEGIN{exit !($_tmux_ver >= 3.3)}" 2>/dev/null; then
             # fzf 0.58+ can keep the popup border native to tmux: tmux draws it
             # around the popup so it survives `v`'s execute handing the popup to
             # the viewer (fzf's own border lives in the alternate screen it
             # leaves). Use a rounded native border to match fzf's look and
             # restore the setting on exit. Older fzf keeps the previous behavior.
-            local _fzf_ver=$(fzf --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+            local _fzf_ver
+            _fzf_ver=$(fzf --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
             if [[ -n "$_fzf_ver" ]] && (( $(_ver_num "$_fzf_ver") >= $(_ver_num "0.58.0") )); then
                 tmux_opt="--tmux 90%,80%,border-native"
                 border_opt="--border=none"
@@ -1210,7 +1217,8 @@ do_query_ui() {
     local INITIAL_DATA="$START_DATA" RELOAD_QUERY="all"
     local initial_multiword_mode="${MULTIWORD_MODE:-ordered}"
     [[ "$initial_multiword_mode" == "any-order" ]] || initial_multiword_mode="ordered"
-    local _order_file="$(mktemp "${TMPDIR:-/tmp}/frecency_order.XXXXXX")"
+    local _order_file
+    _order_file="$(mktemp "${TMPDIR:-/tmp}/frecency_order.XXXXXX")"
     printf '%s\n' "$initial_multiword_mode" > "$_order_file"
     local -a initial_query_words=()
     read -r -a initial_query_words <<< "$search_term"
@@ -1244,9 +1252,11 @@ do_query_ui() {
 
     local CORE_KEYS=(q j k g y v e d r u x /)
     [[ "$SEARCH_MODE" == "sqlite" ]] && CORE_KEYS+=(s)
-    local VIM_NAV=$(IFS=,; echo "${CORE_KEYS[*]}")
+    local VIM_NAV
+    VIM_NAV=$(IFS=,; echo "${CORE_KEYS[*]}")
 
-    local _mode_file=$(mktemp "${TMPDIR:-/tmp}/frecency_mode.XXXXXX")
+    local _mode_file
+    _mode_file=$(mktemp "${TMPDIR:-/tmp}/frecency_mode.XXXXXX")
     [[ "$START_MODE" == "normal" ]] && echo "normal" > "$_mode_file" || echo "search" > "$_mode_file"
 
     local _esc_handler="${_mode_file}.sh"
@@ -1352,8 +1362,9 @@ GITABORT
     # fzf passes execute/reload/preview actions to a shell. Quote SELF with
     # printf %q so an install path containing spaces or metacharacters stays a
     # single command word (plain double quotes would still let a `$` expand).
-    local _QSELF=$(printf '%q' "$SELF")
-    local _QGIT=$(printf '%q' "$SCRIPT_DIR/open_git_repo.sh")
+    local _QSELF _QGIT
+    _QSELF=$(printf '%q' "$SELF")
+    _QGIT=$(printf '%q' "$SCRIPT_DIR/open_git_repo.sh")
     local -a ACTION_KEY_BINDS=(
         --bind "y:execute-silent($_QSELF \"$TOPIC\" fzf-action copy {2})+transform:$_copy_footer {2}"
         --bind "v:execute($_QSELF \"$TOPIC\" fzf-action view {2})"
@@ -1473,7 +1484,7 @@ do_fzf_action() {
             # for this interactive screen when available.
             pager="${PAGER:-less -R}"
             case "${pager%% *}" in cat) pager="less -R" ;; esac
-            command -v "${pager%% *}" >/dev/null 2>&1 || pager=cat
+            command -v "${pager%% *}" >/dev/null 2>&1 || pager="cat"
             cat <<'EOF' | $pager
 ? Help - Full Keybindings
 
@@ -1650,7 +1661,8 @@ for _T in "${TOPICS[@]}"; do
     export MARKER="$DATA_DIR/.${_T}.v4"
     # Lock by database file, not by topic: file/file_dir/file_file share file.db,
     # so they must serialize first-time migration on the same lock.
-    export LOCK_FILE="$DATA_DIR/.$(basename "$DB_PATH").init.lock"
+    LOCK_FILE="$DATA_DIR/.$(basename "$DB_PATH").init.lock"
+    export LOCK_FILE
 
     case "$_T" in
         file_dir) ENTRY_TABLE=dir_entries; TRASH_TABLE=dir_deleted_entries; TICK_KEY=dir_tick ;;
@@ -1679,6 +1691,7 @@ for _T in "${TOPICS[@]}"; do
         # `read -a` word split (multi-word matching, grading, footer). Keep the
         # shell's word-splitting stable regardless of config contents.
         _saved_ifs="$IFS"
+        # shellcheck disable=SC1090  # CONFIG_PATH is the per-topic user config
         source "$CONFIG_PATH"
         IFS="$_saved_ifs"
         # Validate numeric config before it reaches SQL or shell command strings.
