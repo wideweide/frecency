@@ -251,6 +251,23 @@ picker and check:
 7. In SEARCH mode the characters `c`, `v`, `e` only filter text and must not
    trigger any of the actions.
 
+## fzf footer and help
+
+Use a terminal wide enough for the picker (the right preview narrows the footer
+to roughly the left half). With a disposable `HOME`:
+
+1. Default `START_MODE=search`: the footer shows only `Esc Normal  ? Help`.
+2. Press `Esc`: NORMAL shows the full action list on two lines (`↵ Accept`,
+   `c Copy`, `v View`, `e Edit`, then `d Del`, `u Undo`, `r Unbook`,
+   `/ Search`, `? Help`, `Esc Exit`). Press `/` and confirm the footer returns
+   to `Esc Normal  ? Help`.
+3. With a two-word SQLite query, SEARCH shows only
+   `ORDERED/ANY ORDER · NORMAL s→…`; in NORMAL the order line appears above
+   the two key lines. Press `s` in NORMAL and confirm the order label changes
+   and the footer refreshes.
+4. `?` in either mode opens the full key map in a pager; `q` returns to the
+   picker with the list and query intact. With `PAGER=cat`, it should still use
+   `less` when available so the map does not flash past.
 
 ## Installer behavior
 

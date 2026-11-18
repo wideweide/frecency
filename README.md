@@ -235,17 +235,18 @@ Inside the frecency fzf UI (NORMAL mode; these keys only filter text in SEARCH m
 | key | action |
 |---|---|
 | `/` | enter SEARCH mode (prompt turns blue, Vim keys unbound) |
-| `Esc` | SEARCH -> NORMAL, NORMAL -> quit |
+| `Esc` | SEARCH → NORMAL, NORMAL → quit |
 | `q` | quit (NORMAL mode) |
 | `j k h l g G` | Vim navigation (NORMAL mode) |
 | `x` | clear query and start searching |
 | `d` | delete entry (trash table, undoable) |
 | `r` | remove keyword bookmark, keep path and EMS history |
-| `u` | undo last delete |
+| `u` | undo last delete (shown after a delete) |
 | `s` | toggle ordered / any-order multi-word matching |
 | `c` | copy the selected path (no trailing newline); footer shows `copied <path>` and fzf stays |
 | `v` | preview in the picker: `view` (syntax highlighting, netrw for directories) → `$PAGER` → `less -R` → `cat`, override with `FRECENCY_VIEWER`; `q` returns to fzf with the query and scroll position intact; in a tmux popup the rounded border stays visible during the preview (fzf >= 0.58) |
 | `e` | edit with `$EDITOR` (fallback `vi`) and exit fzf without emitting a path; inside tmux opens a new fullscreen window, otherwise runs in the current terminal |
+| `?` | show the full key map in a pager; when `$PAGER` is `cat` or unset it prefers `less -R`, and falls back to `cat` if no pager exists |
 | `Enter` | jump (the only key that emits a path and can change the shell's directory) |
 
 `v` uses fzf `execute`, which suspends the picker so the viewer owns the tmux

@@ -1,24 +1,27 @@
 # Project state
 
-Last updated: 2026-11-17
+Last updated: 2026-11-18
 Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
 
-- Branch: `main`; HEAD `ea267c9` (2026-11-17), in sync with `origin/main`.
+- Branch: `main`; HEAD `969793e` (2026-11-17), in sync with `origin/main`;
+  the fzf footer fixes below are uncommitted in the working tree.
 - Active task: none.
-- Last code change: pre-commit review of the pending audit-remediation + H6/H7
+- Last code change: fzf footer is now mode-aware and no longer overwritten by
+  the startup transform. SEARCH shows only `Esc Normal  ? Help`; NORMAL shows
+  the full action list on two lines (the right preview narrows the footer
+  pane); multi-word SEARCH keeps `ORDERED/ANY ORDER · NORMAL s→…`; multi-word
+  NORMAL adds the order line above the two NORMAL lines. `?` opens the full key
+  map in a pager (`PAGER`, preferring `less -R` when `PAGER=cat`).
+- Previous change: pre-commit review of the pending audit-remediation + H6/H7
   changeset found and fixed two bugs: (1) `_dec()` used `printf '%d' "10#N"`,
   which strtol-parses only up to `#` and returns 10 with stderr noise — every
   cleanup/auto-prune computed keep=1 and wiped tables with >10 entries to a
   single row (empirically 50 rows -> 1); now uses `$(( 10#... ))` arithmetic.
   (2) `do_jump_handler` still had 3 unquoted `$SELF` calls, so `j`/`ji`/`J`/`o`
   broke (rc 127) under a space-containing install path; now `"$SELF"`.
-- Previous change: audit remediation (batches A-E) covering XDG data dir,
-  octal-safe capacity config, per-DB init locking, path-protocol validation,
-  vifm/bundled-binary safety, installer manifest and path normalization, config
-  validation, and doc consistency. Details under "Recent changes".
-- Next action: commit the reviewed audit-remediation changeset; then see
+- Next action: commit the pending fzf footer/README changes; see
   [`TASKS.md`](TASKS.md) for the queued manual host and interactive checks.
 - Blockers: none.
 
@@ -47,6 +50,10 @@ change; record the actual commands and results here.
 | fzf keys | viewer chain: `view` preferred (stub), `FRECENCY_VIEWER='less -R'` override honored; directory opens in netrw via `view` | pass |
 | fzf keys | stub fzf: fzf 0.72 emits `--tmux 90%,80%,border-native` without `--border=rounded`; fzf 0.48 falls back to `--tmux 90%,80%` plus `--border=rounded` | pass |
 | fzf keys | stub tmux: entering the UI sets `popup-border-lines rounded`; the RETURN trap restores the saved `single` value | pass |
+| fzf footer | mock fzf: initial `--footer` is `Esc Normal  ? Help` in SEARCH, the two-line full list in NORMAL, `ORDERED/ANY ORDER · NORMAL s→…` for multi-word SEARCH, and order-line + two-line list for multi-word NORMAL | pass |
+| fzf footer | generated footer handler with NORMAL/SEARCH, ordered/any-order, and 0/2-word query combinations | pass |
+| fzf footer | real tmux 120x40, fzf 0.72: default SEARCH footer, Esc -> NORMAL two-line footer, `/` -> SEARCH footer, `s` switches `ORDERED`/`ANY ORDER` and refreshes the footer, multi-word SEARCH/NORMAL initial footers | pass |
+| fzf help | real tmux: `?` in both modes opens the full key map in `less` even with `PAGER=cat`; `q` returns to the picker | pass |
 | fzf keys | real tmux popup render: rounded border stays visible while `v` viewer owns the popup | pass (confirmed by the maintainer on their terminal) |
 | fzf keys | tmux 3.x `new-window` from `edit-stay` inherits `EDITOR`/`FRECENCY_VIEWER` and creates a new window | pass |
 | Shell helpers | `jc`/`je` in Bash and fish with stub `wl-copy`/`vim`: path copied without newline, `vim -- <path>` called, `$PWD` unchanged | pass |
@@ -69,6 +76,14 @@ change; record the actual commands and results here.
 
 ## Recent changes
 
+- 2026-11-18: fixed the fzf footer mode handling. The startup transform no longer
+  overwrites the initial mode-specific footer; the footer handler now reads the
+  NORMAL/SEARCH state file separately from the ordered/any-order file. SEARCH
+  shows `Esc Normal  ? Help`, NORMAL shows the full action list on two lines
+  (the right preview limits footer width), and multi-word hints follow the
+  actual mode. `?` opens the full key map in a pager, preferring `less -R` when
+  `PAGER=cat`. `README.md` updated. (The `--border=none` tmux popup fix is also
+  in this uncommitted changeset.)
 - 2026-11-17: pre-commit review of the pending changeset fixed two bugs found
   during re-verification. (1) `_dec()` (audit batch A) used `printf '%d'
   "10#N"`; bash printf parses numeric args with strtol, so it stopped at `#`

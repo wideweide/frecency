@@ -1184,7 +1184,7 @@ do_query_ui() {
             local _fzf_ver=$(fzf --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
             if [[ -n "$_fzf_ver" ]] && (( $(_ver_num "$_fzf_ver") >= $(_ver_num "0.58.0") )); then
                 tmux_opt="--tmux 90%,80%,border-native"
-                border_opt=""
+                border_opt="--border=none"
                 _tmux_border_saved=$(tmux show-options -gv popup-border-lines 2>/dev/null)
                 [[ -n "$_tmux_border_saved" ]] && tmux set-option -g popup-border-lines rounded 2>/dev/null
             else
@@ -1195,8 +1195,17 @@ do_query_ui() {
 
     local P_NORMAL="${C_GREEN}${C_BOLD}● NORMAL${C_NORMAL}${C_BOLD} > "
     local P_SEARCH="${C_BLUE}${C_BOLD}● SEARCH${C_NORMAL}${C_BOLD} > "
-    local FOOTER_HINTS="/Search  Esc Normal/Exit  d Del  r Unbook  u Undo  c Copy  v View  e Edit  ↵ Accept"
-    local FOOTER_STR="$FOOTER_HINTS"
+    # Footer hints are mode-specific. SEARCH keeps only the two ways out plus
+    # help; NORMAL lists the actions in priority order. The NORMAL footer is
+    # split across two lines because the list pane (with a right preview) is
+    # narrower than the full key list. Multi-word SQLite mode adds the
+    # ordered/any-order switch hint on its own line.
+    local FOOTER_NORMAL_L1="↵ Accept  c Copy  v View  e Edit"
+    local FOOTER_NORMAL_L2="d Del  u Undo  r Unbook  / Search  ? Help  Esc Exit"
+    local FOOTER_NORMAL="$FOOTER_NORMAL_L1"$'\n'"$FOOTER_NORMAL_L2"
+    local FOOTER_SEARCH="Esc Normal  ? Help"
+    local initial_mode="search"
+    [[ "$START_MODE" == "normal" ]] && initial_mode="normal"
     local SEARCH_ACTION=enable-search
     local -a FZF_VIEW_OPTS=(--with-nth=1)
     local INITIAL_DATA="$START_DATA" RELOAD_QUERY="all"
@@ -1206,10 +1215,25 @@ do_query_ui() {
     printf '%s\n' "$initial_multiword_mode" > "$_order_file"
     local -a initial_query_words=()
     read -r -a initial_query_words <<< "$search_term"
+    local FOOTER_STR
     if [[ "$SEARCH_MODE" == "sqlite" && ${#initial_query_words[@]} -ge 2 ]]; then
-        [[ "$initial_multiword_mode" == "any-order" ]] \
-            && FOOTER_STR="ANY ORDER · NORMAL s→ORDERED" \
-            || FOOTER_STR="ORDERED · NORMAL s→ANY ORDER"
+        local order_label switch_label
+        if [[ "$initial_multiword_mode" == "any-order" ]]; then
+            order_label="ANY ORDER"
+            switch_label="s→ORDERED"
+        else
+            order_label="ORDERED"
+            switch_label="s→ANY ORDER"
+        fi
+        if [[ "$initial_mode" == "normal" ]]; then
+            FOOTER_STR="$order_label · $switch_label"$'\n'"$FOOTER_NORMAL"
+        else
+            FOOTER_STR="$order_label · NORMAL $switch_label"
+        fi
+    elif [[ "$initial_mode" == "normal" ]]; then
+        FOOTER_STR="$FOOTER_NORMAL"
+    else
+        FOOTER_STR="$FOOTER_SEARCH"
     fi
     if [[ "$SEARCH_MODE" == "sqlite" ]]; then
         # SQL reload filters full paths; fzf must not narrow the abbreviated display field.
@@ -1230,13 +1254,17 @@ do_query_ui() {
     local _order_toggle="${_mode_file}.toggle"
     local _footer_handler="${_mode_file}.footer"
     local _copy_footer="${_mode_file}.copyfooter"
+    # The footer handler needs both the ordered/any-order state and the current
+    # NORMAL/SEARCH mode; pass the literal footer strings so there is one
+    # source of truth for both the initial --footer and every transform update.
+    local FOOTER_ACTION="transform:$_footer_handler {q} '$_order_file' '$SEARCH_MODE' '$_mode_file' '$FOOTER_NORMAL_L1' '$FOOTER_NORMAL_L2' '$FOOTER_SEARCH'"
     cat > "$_esc_handler" <<ESCSCRIPT
 #!/bin/bash
 if [ "\$(cat "$_mode_file")" = normal ]; then
     echo abort
 else
     echo normal > "$_mode_file"
-    echo "disable-search+rebind($VIM_NAV)+change-prompt($P_NORMAL)"
+    echo "disable-search+rebind($VIM_NAV)+change-prompt($P_NORMAL)+$FOOTER_ACTION"
 fi
 ESCSCRIPT
     chmod +x "$_esc_handler"
@@ -1253,18 +1281,34 @@ ORDERSCRIPT
     cat > "$_footer_handler" <<'FOOTER_SCRIPT'
 #!/bin/bash
 query="$1"
-state_file="$2"
+order_file="$2"
 search_mode="$3"
-IFS= read -r mode < "$state_file" || mode=ordered
+mode_file="$4"
+normal_l1="$5"
+normal_l2="$6"
+search_footer="$7"
+IFS= read -r order < "$order_file" || order=ordered
+IFS= read -r mode < "$mode_file" || mode=search
 read -r -a words <<< "$query"
 if [[ "$search_mode" == sqlite && ${#words[@]} -ge 2 ]]; then
-    if [[ "$mode" == any-order ]]; then
-        printf '%s' 'change-footer(ANY ORDER · NORMAL s→ORDERED)'
+    if [[ "$order" == any-order ]]; then
+        order_label="ANY ORDER"
+        switch_label="s→ORDERED"
     else
-        printf '%s' 'change-footer(ORDERED · NORMAL s→ANY ORDER)'
+        order_label="ORDERED"
+        switch_label="s→ANY ORDER"
+    fi
+    if [[ "$mode" == normal ]]; then
+        printf 'change-footer(%s · %s\n%s\n%s)' "$order_label" "$switch_label" "$normal_l1" "$normal_l2"
+    else
+        printf 'change-footer(%s · NORMAL %s)' "$order_label" "$switch_label"
     fi
 else
-    printf '%s' 'change-footer(/Search  Esc Normal/Exit  d Del  r Unbook  u Undo  c Copy  v View  e Edit  ↵ Accept)'
+    if [[ "$mode" == normal ]]; then
+        printf 'change-footer(%s\n%s)' "$normal_l1" "$normal_l2"
+    else
+        printf 'change-footer(%s)' "$search_footer"
+    fi
 fi
 FOOTER_SCRIPT
     cat > "$_copy_footer" <<'COPYFOOTER'
@@ -1309,21 +1353,24 @@ COPYFOOTER
     local SET_SEARCH="execute-silent(echo search > '$_mode_file')"
     local SET_NORMAL="execute-silent(echo normal > '$_mode_file')"
 
+    # START_BIND sets the initial mode only. The initial --footer is already
+    # correct for START_MODE and the initial query; do not transform it from
+    # start, where {q} can still be empty and would overwrite a multi-word hint.
     local START_BIND="start:$SEARCH_ACTION+unbind($VIM_NAV)+change-prompt($P_SEARCH)+$SET_SEARCH"
     [[ "$START_MODE" == "normal" ]] && START_BIND="start:disable-search+change-prompt($P_NORMAL)+$SET_NORMAL"
 
-    local SEARCH_BIND="$SEARCH_ACTION+unbind($VIM_NAV)+change-prompt($P_SEARCH)+$SET_SEARCH"
+    local SEARCH_BIND="$SEARCH_ACTION+unbind($VIM_NAV)+change-prompt($P_SEARCH)+$SET_SEARCH+$FOOTER_ACTION"
     [[ "$START_DATA" == "last" ]] && SEARCH_BIND="$SEARCH_BIND+transform:test -z '{q}' && echo 'reload($_QSELF \"$TOPIC\" internal-query all)' || echo 'nop'"
 
     local CHANGE_BIND="first"
     [[ "$SEARCH_MODE" == "sqlite" ]] && CHANGE_BIND="reload(sleep $SLEEP_DELAY; $_QSELF \"$TOPIC\" internal-query all {q} || true)+$CHANGE_BIND"
-    CHANGE_BIND+="+transform:$_footer_handler {q} '$_order_file' '$SEARCH_MODE'"
+    CHANGE_BIND+="+$FOOTER_ACTION"
 
-    local RELOAD_AND_FILTER="reload($_QSELF \"$TOPIC\" internal-query $RELOAD_QUERY)+$SEARCH_ACTION+$SET_SEARCH"
+    local RELOAD_AND_FILTER="reload($_QSELF \"$TOPIC\" internal-query $RELOAD_QUERY)+$SEARCH_ACTION+$SET_SEARCH+$FOOTER_ACTION"
 
     local -a ORDER_MODE_BIND=()
     if [[ "$SEARCH_MODE" == "sqlite" ]]; then
-        ORDER_MODE_BIND+=(--bind "s:execute-silent($_order_toggle '$_order_file')+reload($_QSELF \"$TOPIC\" internal-query all {q} || true)+transform:$_footer_handler {q} '$_order_file' '$SEARCH_MODE'")
+        ORDER_MODE_BIND+=(--bind "s:execute-silent($_order_toggle '$_order_file')+reload($_QSELF \"$TOPIC\" internal-query all {q} || true)+$FOOTER_ACTION")
     fi
 
     # Keep only one fzf invocation: the two TERM branches had identical flags/bind,
@@ -1336,12 +1383,13 @@ COPYFOOTER
             --preview-window=right:50% $border_opt --inline-info \
             --delimiter="$SEP" --accept-nth='2' "${FZF_VIEW_OPTS[@]}" --literal --exact \
             --bind "$START_BIND" --bind "change:$CHANGE_BIND" --bind "/:$SEARCH_BIND" \
-            --bind "x:$SEARCH_ACTION+clear-query+$SET_SEARCH" \
+            --bind "x:$SEARCH_ACTION+clear-query+$SET_SEARCH+$FOOTER_ACTION" \
             --bind "esc:transform:$_esc_handler" \
             --bind "j:down,k:up,h:backward-char,l:forward-char,g:first,G:last,q:abort" \
             --bind "d:execute-silent($_QSELF \"$TOPIC\" internal-op del {})+$RELOAD_AND_FILTER" \
             --bind "r:execute-silent($_QSELF \"$TOPIC\" internal-op unbook {})+$RELOAD_AND_FILTER" \
             --bind "u:execute-silent($_QSELF \"$TOPIC\" internal-op undo)+$RELOAD_AND_FILTER" \
+            --bind "?:execute($_QSELF \"$TOPIC\" fzf-action help)" \
             "${ACTION_KEY_BINDS[@]}" \
             "${ORDER_MODE_BIND[@]}" \
             --preview "$_QSELF \"$TOPIC\" preview {}"
@@ -1389,7 +1437,7 @@ _frecency_viewer_cmd() {
 # popup, so `e` can hand over to a fullscreen editor and abort. Every variant
 # leaves the shell's PWD alone.
 do_fzf_action() {
-    local mode="$1" path="$2" foreground cmd
+    local mode="$1" path="$2" foreground cmd pager
     case "$mode" in
         copy)
             if command -v wl-copy >/dev/null 2>&1; then
@@ -1397,6 +1445,43 @@ do_fzf_action() {
             elif command -v xclip >/dev/null 2>&1; then
                 printf '%s' "$path" | xclip -selection clipboard
             fi
+            return 0
+            ;;
+        help)
+            # Show the full key map in the user's pager; fzf's execute action
+            # suspends the picker so this owns the terminal/popup until q.
+            # PAGER=cat is common but would just flash the text, so prefer less
+            # for this interactive screen when available.
+            pager="${PAGER:-less -R}"
+            case "${pager%% *}" in cat) pager="less -R" ;; esac
+            command -v "${pager%% *}" >/dev/null 2>&1 || pager=cat
+            cat <<'EOF' | $pager
+? Help - Full Keybindings
+
+NORMAL mode:
+  ↵ Enter     - Accept selection (jump to directory / copy file path)
+  c           - Copy path to clipboard (footer confirms)
+  v           - Preview file (view/netrw/less/cat), q to return
+  e           - Edit with $EDITOR (opens in new tmux window if in tmux)
+  d           - Delete entry (moves to trash, undoable with u)
+  r           - Remove bookmark (keep EMS history)
+  u           - Undo last delete
+  /           - Enter SEARCH mode
+  s           - Toggle ordered/any-order multi-word matching
+  x           - Clear query
+  j/k/h/l     - Vim navigation (down/up/left/right)
+  g/G         - First/Last entry
+  ?           - Show this help
+  Esc         - Exit fzf
+  q           - Quit (NORMAL mode)
+
+SEARCH mode:
+  /           - (already in search)
+  Esc         - Return to NORMAL mode
+  ?           - Show this help
+
+Press q to close this help
+EOF
             return 0
             ;;
         edit-stay)
