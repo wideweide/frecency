@@ -802,10 +802,11 @@ do_add() {
     _do_upsert_route "$content" "$keyword" || return 1
 
     # Low-frequency background maintenance: trim the undo table and act as a
-    # safety net for capacity checks missed by concurrent writers.
-    # Probabilistic (0.1%); automatic capacity pruning itself runs above, after
-    # every write.
-    if (( RANDOM % 1000 == 0 )); then
+    # safety net for concurrent writers. It calls do_cleanup, so it runs the
+    # score floor before the capacity cap, just like the per-write path.
+    # Probabilistic (0.5%, about once every 200 writes); the normal per-write
+    # pruning above is unchanged.
+    if (( RANDOM % 200 == 0 )); then
         for dest in "${_route_targets[@]}"; do
             case "$dest" in
                 unified) "$SELF" file cleanup >/dev/null 2>&1 & ;;

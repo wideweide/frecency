@@ -403,7 +403,9 @@ per-table limits and score floors in `~/.local/share/frecency/file.config`;
 empty limits fall back to `MAX_ENTRIES` and empty floors use the defaults above.
 Set a limit or floor to `0` to disable that stage for the table. `LAMBDA` stays
 static per table; tune `MIN_SCORE`, not `LAMBDA`, if you want less or more
-aggressive pruning.
+aggressive pruning. A low-probability background pass (about 1 in 200 writes)
+runs the same `cleanup` as a safety net for concurrent writers, using the same
+score-then-capacity order.
 
 Legacy entries remain in unified `entries` after upgrade. Split histories start
 accumulating when those directories and files are next visited or opened; the

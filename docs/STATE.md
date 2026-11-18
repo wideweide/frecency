@@ -5,7 +5,7 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
 
-- Branch: `main`; last commit `e28fd62` (2026-11-18). Use `git status`
+- Branch: `main`; last code commit `e28fd62` (2026-11-18). Use `git status`
   and `git log` for the authoritative current state.
 - Active task: none; the score-floor task below is implemented but uncommitted.
 - Last code change: two-stage maintenance. `MIN_SCORE_UNIFIED=0.01`,
@@ -98,9 +98,17 @@ change; record the actual commands and results here.
 | Real data | before: unified `1265` nonbook / `1085` <0.01, dir `117` / `36` <0.05, file `63` / `14` <0.05 | pass |
 | Real data | one `cleanup` pass per logical topic: nonbook -> `180`/`81`/`49`, below-floor -> `0`/`0`/`0`, bookmarks `13`/`11`/`2` unchanged | pass |
 | Real data | backup vs live: 0 bookmarks lost, 0 unexpected rows, event clocks and undo tables unchanged, live `PRAGMA integrity_check` ok | pass |
+| Background cleanup | source, pushed HEAD and installed copy all show `do_cleanup()` starting with `_prune_low_score()`; `RANDOM % 200 == 0` sampled `97/20000` (~0.5%) | pass |
 
 ## Recent changes
 
+- 2026-11-18: raised the low-frequency background cleanup chance from `1/1000`
+  to `1/200` (~0.5%, roughly once every few days of normal use) and updated its
+  comment. Verified against source, pushed HEAD and the installed copy that
+  `do_cleanup()` already starts with `_prune_low_score()`, so the background
+  path is already score-then-capacity; no duplicate call was added. `README.md`
+  and DLT `docs/frecency.md` were synced, and the local runtime was refreshed
+  with `./install.sh --register` (copy identical, self-check ok).
 - 2026-11-18 (real data): with explicit user request, took a verified sqlite
   `.backup` of every topic DB plus configs (location in the private workflow),
   measured before/after score distributions, then ran one `cleanup` pass per
