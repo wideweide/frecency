@@ -24,9 +24,11 @@ jobs:
           fish -n shell/frecency.fish
 
       - name: shellcheck
-        run: shellcheck -S warning \
-          scripts/frecency scripts/frecency-test scripts/bmark.sh \
-          scripts/open_git_repo.sh install.sh shell/frecency.bash
+        run: |
+          shellcheck --version
+          shellcheck -S warning \
+            scripts/frecency scripts/frecency-test scripts/bmark.sh \
+            scripts/open_git_repo.sh install.sh shell/frecency.bash
 
       - name: Test suite
         run: bash tests/run-tests.sh
