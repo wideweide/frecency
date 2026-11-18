@@ -270,9 +270,9 @@ terminal. An entry outside a repository prints an error and leaves
 the picker open. The uppercase `C`/`V`/`E` bindings
 were removed; `Enter` remains the only navigation exit.
 
-Capacity cleanup is automatic after every write, so the old NORMAL-mode `C`
-cleanup binding was removed; `frecency <topic> cleanup` is still available
-manually.
+Score-floor and capacity cleanup are automatic after every write, so the old
+NORMAL-mode `C` cleanup binding was removed; `frecency <topic> cleanup` is still
+available manually.
 
 ### Key conflicts
 
@@ -372,6 +372,9 @@ MAX_ENTRIES=1500          # fallback capacity for each history table
 MAX_ENTRIES_UNIFIED=      # per-table override for the `entries` table
 MAX_ENTRIES_DIR=          # per-table override for `dir_entries`
 MAX_ENTRIES_FILE=         # per-table override for `file_entries`
+MIN_SCORE_UNIFIED=0.01    # current-score floor for `entries` (0 disables)
+MIN_SCORE_DIR=0.05        # current-score floor for `dir_entries` (0 disables)
+MIN_SCORE_FILE=0.05       # current-score floor for `file_entries` (0 disables)
 MAX_PATH_CHARS=60         # weighted display width before list paths abbreviate
 START_MODE=search         # 'search' starts with prompt ready, 'normal' with Vim keys
 START_DATA=all            # 'all' loads everything, 'last' only the LAST_LIMIT recent entries
@@ -388,12 +391,19 @@ counts file events; `file_dir`, `file_file`, and other topics default to
 `0.01`. A `LAMBDA` set in a topic config overrides the default for every
 destination that topic writes.
 
-Capacity is checked after every write. Each table keeps at most its configured
-limit of unbookmarked entries; when the limit is exceeded, the lowest-scoring
-entries are removed down to 90% of the limit. Bookmarked entries are never
-counted or removed. The three tables share `file.db`, so put the per-table
-limits in `~/.local/share/frecency/file.config`; empty values fall back to
-`MAX_ENTRIES`. Set a limit to `0` to disable automatic pruning for that table.
+Maintenance has two stages, run after every write and by
+`frecency <topic> cleanup`: first, unbookmarked entries whose **current** score
+(aligned to that table's own event clock) is below the destination's
+`MIN_SCORE` are deleted; then the table is capped at its `MAX_ENTRIES` limit by
+removing the lowest-scoring entries down to 90% of the limit. The score floor is
+an active trim; the capacity cap is a hard backstop, so both are kept. Bookmarked
+entries are never counted or removed, and on writes the entry just written is
+protected from both stages. The three tables share `file.db`, so put the
+per-table limits and score floors in `~/.local/share/frecency/file.config`;
+empty limits fall back to `MAX_ENTRIES` and empty floors use the defaults above.
+Set a limit or floor to `0` to disable that stage for the table. `LAMBDA` stays
+static per table; tune `MIN_SCORE`, not `LAMBDA`, if you want less or more
+aggressive pruning.
 
 Legacy entries remain in unified `entries` after upgrade. Split histories start
 accumulating when those directories and files are next visited or opened; the
@@ -445,8 +455,8 @@ program.
 
 Use `frecency file query` to inspect and search the `file` history. Replace
 `file` with another topic name for that topic. `frecency <topic> cleanup` prunes
-unbookmarked entries above that topic's capacity limit; bookmarked entries are
-retained. Individual entries can be deleted
+unbookmarked entries below that topic's score floor and above its capacity
+limit; bookmarked entries are retained. Individual entries can be deleted
 with `frecency <topic> remove <content>` or from the UI with undo available.
 There is currently no supported command to reset or list all entries for a
 topic in the CLI. Do not delete a database file as a reset shortcut; that can
@@ -474,7 +484,7 @@ frecency <topic> jump-handler [--picker] [--emit=path] [term]
 frecency <topic> jump-handler-vifm [term]   # same, vifm flavour (goto)
 frecency <topic> remove <content>           # delete (undoable in the UI)
 frecency <topic> recent <seconds> [content] # exit 0 if content (or anything) changed recently
-frecency <topic> cleanup                    # prune above the capacity limit
+frecency <topic> cleanup                    # prune below score floor / above capacity
 ```
 
 For the shared `file.db`, logical topics `file`, `file_dir`, and `file_file`

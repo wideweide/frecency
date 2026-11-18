@@ -25,6 +25,9 @@
 #   the tick at that moment; different entries hold scores at different ticks and
 #   cannot be compared directly. Sorting / cleanup / display always use current,
 #   aligning every entry to the same moment.
+#   Maintenance first deletes unbookmarked rows whose current score is below
+#   MIN_SCORE, then caps the table at MAX_ENTRIES (trimming to 90% of it); λ is
+#   static per table, so only the score floor is meant to be tuned.
 #   Half-life = ln(2)/LAMBDA visits. The unified `file` history pools
 #   directory visits and file opens, so it defaults to LAMBDA=0.005 (about
 #   139 visits); other topics keep 0.01 (about 69 visits).
@@ -47,7 +50,7 @@
 #                                              : exit 0 if the entry <content>
 #                                                (any entry when omitted) was
 #                                                updated within the last N seconds
-#    frecency <topic> cleanup                  : manual maintenance
+#    frecency <topic> cleanup                  : manual score + capacity maintenance
 #
 # The generic interface accepts comma-separated topics; `file`, `file_dir`, and
 # `file_file` share file.db and address the unified, directory, and file histories.
@@ -102,6 +105,11 @@ MAX_ENTRIES_UNIFIED=    # per-table override; empty falls back to MAX_ENTRIES
 MAX_ENTRIES_DIR=
 MAX_ENTRIES_FILE=
 _PRUNE_FILL_PERCENT=90  # prune down to this percentage of the limit
+# Minimum current score for an unbookmarked row; empty uses the per-destination
+# default in _min_score_for_dest (0.01 unified, 0.05 dir/file); 0 disables it.
+MIN_SCORE_UNIFIED=
+MIN_SCORE_DIR=
+MIN_SCORE_FILE=
 SLEEP_DELAY=0.06    # reload debounce for sqlite mode; a query takes ~25ms, so 0.2 is pure lag
 START_DATA=all      # 'last' recent entries / 'all' everything
 START_MODE=search   # 'normal' (Vim keys) / 'search' (type directly)
@@ -349,9 +357,10 @@ _dec() { printf '%s' "$(( 10#${1:-0} ))"; }
 # Non-negative decimal number (integer or float), for SLEEP_DELAY / LAMBDA.
 _is_num() { [[ ${1:-} =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; }
 
-# The three file.db tables share file.config for their per-table limits. When a
-# split topic (file_dir/file_file) is invoked directly, pick up any limits from
-# file.config without changing the rest of that topic's configuration.
+# The three file.db tables share file.config for their per-table limits and
+# score floors. When a split topic (file_dir/file_file) is invoked directly,
+# pick up those values from file.config without changing the rest of that
+# topic's configuration.
 _SHARED_LIMITS_LOADED=0
 _load_shared_file_limits() {
     (( _SHARED_LIMITS_LOADED )) && return 0
@@ -359,16 +368,21 @@ _load_shared_file_limits() {
     [[ "$CONFIG_PATH" == "$DATA_DIR/file.config" ]] && return 0
     [[ -f "$DATA_DIR/file.config" ]] || return 0
     _SHARED_LIMITS_LOADED=1
-    local vals base uni dir file
+    local vals base uni dir file min_u min_d min_f
     vals=$( ( source "$DATA_DIR/file.config" >/dev/null 2>&1
-              printf '%s\n%s\n%s\n%s\n' \
+              printf '%s\n' \
                   "${MAX_ENTRIES-}" "${MAX_ENTRIES_UNIFIED-}" \
-                  "${MAX_ENTRIES_DIR-}" "${MAX_ENTRIES_FILE-}" ) 2>/dev/null ) || return 0
-    { IFS= read -r base; IFS= read -r uni; IFS= read -r dir; IFS= read -r file; } <<< "$vals"
+                  "${MAX_ENTRIES_DIR-}" "${MAX_ENTRIES_FILE-}" \
+                  "${MIN_SCORE_UNIFIED-}" "${MIN_SCORE_DIR-}" "${MIN_SCORE_FILE-}" ) 2>/dev/null ) || return 0
+    { IFS= read -r base; IFS= read -r uni; IFS= read -r dir; IFS= read -r file
+      IFS= read -r min_u; IFS= read -r min_d; IFS= read -r min_f; } <<< "$vals"
     [[ -n "${MAX_ENTRIES:-}" ]] || MAX_ENTRIES=$base
     [[ -n "${MAX_ENTRIES_UNIFIED:-}" ]] || MAX_ENTRIES_UNIFIED=$uni
     [[ -n "${MAX_ENTRIES_DIR:-}" ]] || MAX_ENTRIES_DIR=$dir
     [[ -n "${MAX_ENTRIES_FILE:-}" ]] || MAX_ENTRIES_FILE=$file
+    [[ -n "${MIN_SCORE_UNIFIED:-}" ]] || MIN_SCORE_UNIFIED=$min_u
+    [[ -n "${MIN_SCORE_DIR:-}" ]] || MIN_SCORE_DIR=$min_d
+    [[ -n "${MIN_SCORE_FILE:-}" ]] || MIN_SCORE_FILE=$min_f
 }
 
 # Capacity limit for a history destination. Empty per-table values fall back to
@@ -382,6 +396,24 @@ _limit_for_dest() {
         dir)     printf '%s' "${MAX_ENTRIES_DIR:-$base}" ;;
         file)    printf '%s' "${MAX_ENTRIES_FILE:-$base}" ;;
     esac
+}
+
+# Minimum current score for a history destination. Empty config values use the
+# per-destination defaults; 0 disables score pruning. Invalid values become 0 so
+# they can never reach generated SQL. Defaults live here, not in the config
+# section, so an explicit file_dir/file_file config does not leak into file.
+_min_score_for_dest() {
+    _load_shared_file_limits
+    local value default
+    case "$1" in
+        unified) value=${MIN_SCORE_UNIFIED-}; default=0.01 ;;
+        dir)     value=${MIN_SCORE_DIR-};     default=0.05 ;;
+        file)    value=${MIN_SCORE_FILE-};    default=0.05 ;;
+        *) return 0 ;;
+    esac
+    [[ -n "$value" ]] || value=$default
+    _is_num "$value" || value=0
+    printf '%s' "$value"
 }
 
 _dest_for_current_table() {
@@ -605,9 +637,30 @@ DELETE FROM $table
                     LIMIT -1 OFFSET $keep);" >/dev/null
 }
 
+# Proactively delete unbookmarked rows whose current (aligned) score fell below
+# the floor. Unlike capacity pruning this is a plain WHERE scan: no sorting, so
+# it is cheap to run before the capacity check. `protect` is the content just
+# written; λ and the tick key belong to the destination being pruned.
+_prune_low_score() {
+    local table="$1" tick_key="$2" lambda="$3" min_score="$4" protect="${5:-}"
+    _is_num "$min_score" || return 0
+    awk "BEGIN{exit !($min_score > 0)}" || return 0
+    local protect_sql=""
+    [[ -n "$protect" ]] && protect_sql="AND content <> $(sql_lit "$protect")"
+    run_sql "
+DELETE FROM $table
+ WHERE keyword = ''
+   $protect_sql
+   AND score * exp(-$lambda * (
+         (SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key') - tick
+       )) < $min_score;" >/dev/null
+}
+
 do_cleanup() {
     _ensure_ready || return 1
-    local limit keep
+    local limit keep min
+    min=$(_min_score_for_dest "$(_dest_for_current_table)")
+    _prune_low_score "$ENTRY_TABLE" "$TICK_KEY" "$LAMBDA" "$min" || return 1
     limit=$(_limit_for_dest "$(_dest_for_current_table)")
     if _is_uint "$limit" && (( $(_dec "$limit") > 0 )); then
         keep=$(( $(_dec "$limit") * $(_dec "$_PRUNE_FILL_PERCENT") / 100 ))
@@ -667,27 +720,26 @@ ON CONFLICT(content) DO UPDATE SET
     score = score * exp(-$lambda * ((SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key') - tick)) + 1,
     visits = visits + 1,
     tick = (SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key'),
-    last_access = CURRENT_TIMESTAMP;
-SELECT COUNT(*) FROM $table WHERE keyword = '';"
+    last_access = CURRENT_TIMESTAMP;"
     done
     route_sql+=$'\nCOMMIT;'
 
-    # Counts are collected in the write transaction; pruning itself runs after
-    # the commit so the write lock is not held while sorting/deleting.
-    local out
-    out=$(run_sql "$route_sql") || return 1
-    local -a counts=()
-    mapfile -t counts <<< "$out"
-    local i limit n keep
+    # Pruning runs after the commit so the write lock is not held while scanning
+    # or sorting. Score pruning goes first (a plain predicate, no sort), then a
+    # fresh count and the capacity check for each destination written.
+    run_sql "$route_sql" >/dev/null || return 1
+    local i min limit n keep
     for i in "${!dests[@]}"; do
+        min=$(_min_score_for_dest "${dests[$i]}")
+        _prune_low_score "${tables[$i]}" "${ticks[$i]}" "${lambdas[$i]}" \
+            "$min" "$content" || return 1
+
+        n=$(run_sql "SELECT COUNT(*) FROM ${tables[$i]} WHERE keyword = '';")
+        _is_uint "$n" || continue
         limit=$(_limit_for_dest "${dests[$i]}")
-        if ! _is_uint "$limit"; then
-            continue
-        fi
+        _is_uint "$limit" || continue
         limit=$(_dec "$limit")
         (( limit > 0 )) || continue
-        n=${counts[$i]:-}
-        _is_uint "$n" || continue
         if (( $(_dec "$n") > limit )); then
             keep=$(( limit * $(_dec "$_PRUNE_FILL_PERCENT") / 100 ))
             (( keep >= 1 )) || keep=1
@@ -1674,6 +1726,9 @@ for _T in "${TOPICS[@]}"; do
     MAX_ENTRIES_UNIFIED=
     MAX_ENTRIES_DIR=
     MAX_ENTRIES_FILE=
+    MIN_SCORE_UNIFIED=
+    MIN_SCORE_DIR=
+    MIN_SCORE_FILE=
     _SHARED_LIMITS_LOADED=0
     if [[ -f "$CONFIG_PATH" ]]; then
         # A config may accidentally change IFS, which would corrupt every later

@@ -7,24 +7,31 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 - Branch: `main`; last code commit `d0da97c` (2026-11-18). Use `git status`
   and `git log` for the authoritative current state.
-- Active task: none.
-- Last code change: NORMAL-mode keys are now `y` (copy, Vim yank habit) and
+- Active task: none; the score-floor task below is implemented but uncommitted.
+- Last code change: two-stage maintenance. `MIN_SCORE_UNIFIED=0.01`,
+  `MIN_SCORE_DIR=0.05`, `MIN_SCORE_FILE=0.05` (`0` disables) drive a new
+  `_prune_low_score()` that deletes unbookmarked rows below their current aligned
+  score; it runs before the existing capacity prune after each write and in
+  `cleanup`. λ stays static. `README.md`, `docs/REGRESSION.md`, and DLT
+  `docs/frecency.md` were synced.
+- Previous code change: NORMAL-mode keys are now `y` (copy, Vim yank habit) and
   `g` (open the selected entry's git repository in the first available
   `gitui`/`ziggity`/`lazygit` in a new tmux window, then exit fzf). `g:first`
   and `G:last` were removed, along with `h`/`l` (single-column list); only
   `j`/`k` move. The helper lives in `scripts/open_git_repo.sh` and is installed
   with the other scripts. Entries outside a git repository leave the picker
   open.
-- Previous change: pre-commit review of the pending audit-remediation + H6/H7
+- Earlier change: pre-commit review of the pending audit-remediation + H6/H7
   changeset found and fixed two bugs: (1) `_dec()` used `printf '%d' "10#N"`,
   which strtol-parses only up to `#` and returns 10 with stderr noise — every
   cleanup/auto-prune computed keep=1 and wiped tables with >10 entries to a
   single row (empirically 50 rows -> 1); now uses `$(( 10#... ))` arithmetic.
   (2) `do_jump_handler` still had 3 unquoted `$SELF` calls, so `j`/`ji`/`J`/`o`
   broke (rc 127) under a space-containing install path; now `"$SELF"`.
-- Next action: none queued; see [`TASKS.md`](TASKS.md) for the remaining
-  manual host and interactive checks.
-- Blockers: none.
+- Next action: none queued; see [`TASKS.md`](TASKS.md) for the remaining manual
+  host and interactive checks.
+- Blockers: none. Real-data cleanup was explicitly requested and performed after
+  a verified backup; see the 2026-11-18 real-data entry below.
 
 ## What was verified
 
@@ -79,9 +86,46 @@ change; record the actual commands and results here.
 | Git TUI | `TMUX` set + stub tmux: `tmux new-window 'cd <repo> && exec <tool>'` (space-containing repo path escaped) and `ok` status; without `TMUX` the tool runs in the current terminal | pass |
 | Git TUI | generated abort transform: `ok` → `abort`, `fail`/missing → `nop` | pass |
 | Installer | `./install.sh --dry-run --register` in a disposable HOME installs `open_git_repo.sh` | pass |
+| Score cleanup | `bash -n` (6 scripts) + `fish -n shell/frecency.fish` + `git diff --check` | pass |
+| Score cleanup | disposable HOME, 100 dead + 1 live + 1 bookmark, `file add --route unified` -> `0\|1\|1\|1` | pass |
+| Score cleanup | floors from `file.config`, manual `file_dir`/`file_file`/`file cleanup` -> `0\|1\|1\|0\|1\|1\|0\|1\|1` | pass |
+| Score cleanup | `MIN_SCORE_UNIFIED=0` then `abc`: dead rows stay `10\|10`, no SQL error | pass |
+| Score cleanup | floor `2` protects the just-written row: `10\|0\|1\|1` | pass |
+| Score cleanup | `MAX_ENTRIES_UNIFIED=100` after score prune: `91\|90\|1\|1` | pass |
+| Score cleanup | multi-topic `file_dir,other`: file.db keeps `10` (floor 0), other.db has `0` (default) | pass |
+| Installer | `./install.sh --dry-run --register` preview after the change | pass |
+| Real data | sqlite `.backup` of all topic DBs + configs; backup `file.db` integrity ok and row counts match source | pass |
+| Real data | before: unified `1265` nonbook / `1085` <0.01, dir `117` / `36` <0.05, file `63` / `14` <0.05 | pass |
+| Real data | one `cleanup` pass per logical topic: nonbook -> `180`/`81`/`49`, below-floor -> `0`/`0`/`0`, bookmarks `13`/`11`/`2` unchanged | pass |
+| Real data | backup vs live: 0 bookmarks lost, 0 unexpected rows, event clocks and undo tables unchanged, live `PRAGMA integrity_check` ok | pass |
 
 ## Recent changes
 
+- 2026-11-18 (real data): with explicit user request, took a verified sqlite
+  `.backup` of every topic DB plus configs (location in the private workflow),
+  measured before/after score distributions, then ran one `cleanup` pass per
+  logical topic on `file.db`. Unified nonbookmarked rows went `1265 -> 180`
+  (`1085` removed below 0.01), dir `117 -> 81` (`36` below 0.05), file `63 -> 49`
+  (`14` below 0.05); all `26` bookmarks survived, no capacity prune fired (all
+  tables are far below 1500), event clocks and undo tables are unchanged, and
+  both backup and live DB pass `PRAGMA integrity_check`. The changeset was
+  committed and pushed to `origin/main`; the DLT doc was committed and pushed
+  to `origin/master`; the local runtime was refreshed with
+  `./install.sh --register` and passed its self-check.
+- 2026-11-18: added per-destination score-floor maintenance. Source facts were
+  checked first: capacity falls back to `MAX_ENTRIES`=1500 with a 90% fill, and
+  there was no score floor. `scripts/frecency` now reads
+  `MIN_SCORE_UNIFIED=0.01` / `_DIR=0.05` / `_FILE=0.05` (`0` disables, invalid
+  becomes `0`); new `_prune_low_score()` deletes only `keyword=''` rows whose
+  current aligned score is below the floor, using each table's tick key and λ.
+  `_do_upsert_route()` and `do_cleanup()` run it before the existing capacity
+  prune and re-count before that prune. Defaults live in `_min_score_for_dest()`
+  so `file_dir`/`file_file` can share `file.config` values without config
+  leaking across topics; λ remains static and the background cleanup path is
+  unchanged. `README.md`, `docs/REGRESSION.md`, and DLT `docs/frecency.md` were
+  updated. Completion notes: DLT doc updated = yes; local runtime refreshed =
+  yes (`./install.sh --register` + self-check); commit/push = yes, code and
+  state together to `origin/main`.
 - 2026-11-18: NORMAL-mode key changes. `c` is now `y` for copying the path
   (Vim yank habit). `g` now opens the git repository containing the focused
   entry in a new tmux window (like `e`; the current terminal without tmux) and
