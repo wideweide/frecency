@@ -5,7 +5,7 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
 
-- Branch: `main`; last code commit `9262ab3` (2026-11-18). Use `git status`
+- Branch: `main`; last code commit `d0da97c` (2026-11-18). Use `git status`
   and `git log` for the authoritative current state.
 - Active task: none.
 - Last code change: NORMAL-mode keys are now `y` (copy, Vim yank habit) and
