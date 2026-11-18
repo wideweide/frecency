@@ -8,12 +8,13 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 - Branch: `main`; last code commit `9262ab3` (2026-11-18). Use `git status`
   and `git log` for the authoritative current state.
 - Active task: none.
-- Last code change: fzf footer is now mode-aware and no longer overwritten by
-  the startup transform. SEARCH shows only `Esc Normal  ? Help`; NORMAL shows
-  the full action list on two lines (the right preview narrows the footer
-  pane); multi-word SEARCH keeps `ORDERED/ANY ORDER · NORMAL s→…`; multi-word
-  NORMAL adds the order line above the two NORMAL lines. `?` opens the full key
-  map in a pager (`PAGER`, preferring `less -R` when `PAGER=cat`).
+- Last code change: NORMAL-mode keys are now `y` (copy, Vim yank habit) and
+  `g` (open the selected entry's git repository in the first available
+  `gitui`/`ziggity`/`lazygit` in a new tmux window, then exit fzf). `g:first`
+  and `G:last` were removed, along with `h`/`l` (single-column list); only
+  `j`/`k` move. The helper lives in `scripts/open_git_repo.sh` and is installed
+  with the other scripts. Entries outside a git repository leave the picker
+  open.
 - Previous change: pre-commit review of the pending audit-remediation + H6/H7
   changeset found and fixed two bugs: (1) `_dec()` used `printf '%d' "10#N"`,
   which strtol-parses only up to `#` and returns 10 with stderr noise — every
@@ -73,9 +74,25 @@ change; record the actual commands and results here.
 | Review | space-path script: `jump-handler --emit=path <term>`, no-term and `--picker` variants under `sp ace dir` all rc 0 (were rc 127 before the quoting fix) | pass |
 | Review | installer: `--dry-run --register` full preview, manifest not written on dry-run; fresh-HOME `--dry-run --uninstall` rc 0; `--uninstall --unregister` rc 2; `--dry-run --no-register` preview has 0 register actions | pass |
 | Review | installer round-trip in disposable HOME: `--register` writes the 8-key manifest, `--uninstall` removes 7 files + registrations + manifest, no leftovers in the vifm scripts dir | pass |
+| fzf keys | stub fzf 0.72 argv capture: `y:` copy bind, `g:` git bind, nav bind is `j,k` (no `h`/`l`/`G`) | pass |
+| Git TUI | `open_git_repo.sh` with stubs: file uses its parent repo, directory checked directly, missing path uses its parent; priority `gitui` → `ziggity` → `lazygit` and each runs with `$PWD` at the repo root; outside repo and no-tool cases exit 1 and write `fail` | pass |
+| Git TUI | `TMUX` set + stub tmux: `tmux new-window 'cd <repo> && exec <tool>'` (space-containing repo path escaped) and `ok` status; without `TMUX` the tool runs in the current terminal | pass |
+| Git TUI | generated abort transform: `ok` → `abort`, `fail`/missing → `nop` | pass |
+| Installer | `./install.sh --dry-run --register` in a disposable HOME installs `open_git_repo.sh` | pass |
 
 ## Recent changes
 
+- 2026-11-18: NORMAL-mode key changes. `c` is now `y` for copying the path
+  (Vim yank habit). `g` now opens the git repository containing the focused
+  entry in a new tmux window (like `e`; the current terminal without tmux) and
+  exits the picker; outside a repository it leaves the picker open. `g:first`
+  and `G:last` were removed, as were `h`/`l`: the list is a single vertical
+  column, so only `j`/`k` move. The new `scripts/open_git_repo.sh` resolves a
+  file to its parent directory, accepts a directory directly, and opens the
+  repository with the first installed `gitui` → `ziggity` → `lazygit`; it
+  writes a status file so the picker aborts only when a TUI actually started.
+  `install.sh`, `README.md`, `docs/REGRESSION.md`, and `docs/TASKS.md` were
+  updated.
 - 2026-11-18: fixed the fzf footer mode handling. The startup transform no longer
   overwrites the initial mode-specific footer; the footer handler now reads the
   NORMAL/SEARCH state file separately from the ordered/any-order file. SEARCH
@@ -187,7 +204,7 @@ change; record the actual commands and results here.
 
 - Bash, fish, vifm, and Neovim host event behavior is not covered by automated
   end-to-end tests; see the "Not covered" section of `REGRESSION.md`.
-- `ji` and the NORMAL-mode `c`/`v`/`e` actions still need an interactive pass on
-  the maintainer's own terminal/tmux setup; the recorded pty checks were run on
-  one machine only. (`C`/`V`/`E` are unbound and need no testing.)
+- `ji` and the NORMAL-mode `y`/`v`/`e`/`g` actions still need an interactive pass
+  on the maintainer's own terminal/tmux setup; the recorded pty checks were run
+  on one machine only. (`C`/`V`/`E` are unbound and need no testing.)
 - There is no supported CLI command to reset or list all entries for a topic.

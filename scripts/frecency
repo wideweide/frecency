@@ -1200,7 +1200,7 @@ do_query_ui() {
     # split across two lines because the list pane (with a right preview) is
     # narrower than the full key list. Multi-word SQLite mode adds the
     # ordered/any-order switch hint on its own line.
-    local FOOTER_NORMAL_L1="↵ Accept  c Copy  v View  e Edit"
+    local FOOTER_NORMAL_L1="↵ Accept  y Copy  v View  e Edit  g Git"
     local FOOTER_NORMAL_L2="d Del  u Undo  r Unbook  / Search  ? Help  Esc Exit"
     local FOOTER_NORMAL="$FOOTER_NORMAL_L1"$'\n'"$FOOTER_NORMAL_L2"
     local FOOTER_SEARCH="Esc Normal  ? Help"
@@ -1243,7 +1243,7 @@ do_query_ui() {
         [[ -n "$search_term" ]] && INITIAL_DATA=all
     fi
 
-    local CORE_KEYS=(q j k h l g G c v e d r u x /)
+    local CORE_KEYS=(q j k g y v e d r u x /)
     [[ "$SEARCH_MODE" == "sqlite" ]] && CORE_KEYS+=(s)
     local VIM_NAV=$(IFS=,; echo "${CORE_KEYS[*]}")
 
@@ -1254,6 +1254,8 @@ do_query_ui() {
     local _order_toggle="${_mode_file}.toggle"
     local _footer_handler="${_mode_file}.footer"
     local _copy_footer="${_mode_file}.copyfooter"
+    local _git_status="${_mode_file}.gitstatus"
+    local _git_abort="${_mode_file}.gitabort"
     # The footer handler needs both the ordered/any-order state and the current
     # NORMAL/SEARCH mode; pass the literal footer strings so there is one
     # source of truth for both the initial --footer and every transform update.
@@ -1318,11 +1320,22 @@ FOOTER_SCRIPT
 # inside change-footer(...) is parsed as one string by fzf.
 printf 'change-footer(copied %s)' "$1"
 COPYFOOTER
-    chmod +x "$_order_toggle" "$_footer_handler" "$_copy_footer"
-    trap 'rm -f "$_mode_file" "$_esc_handler" "$_order_file" "$_order_toggle" "$_footer_handler" "$_copy_footer"; [[ -z "$_tmux_border_saved" ]] || tmux set-option -g popup-border-lines "$_tmux_border_saved" 2>/dev/null || true' RETURN
+    cat > "$_git_abort" <<'GITABORT'
+#!/bin/bash
+# open_git_repo.sh writes "ok" only when it actually started a git TUI, so
+# abort the picker only in that case; an entry outside a repository keeps fzf
+# open after the script reports the failure.
+if [ "$(cat "$1" 2>/dev/null)" = ok ]; then
+    echo abort
+else
+    echo nop
+fi
+GITABORT
+    chmod +x "$_order_toggle" "$_footer_handler" "$_copy_footer" "$_git_abort"
+    trap 'rm -f "$_mode_file" "$_esc_handler" "$_order_file" "$_order_toggle" "$_footer_handler" "$_copy_footer" "$_git_status" "$_git_abort"; [[ -z "$_tmux_border_saved" ]] || tmux set-option -g popup-border-lines "$_tmux_border_saved" 2>/dev/null || true' RETURN
 
     # All action keys use {2}, the raw path field, and never change the caller's
-    # PWD or emit a path. `c` only copies the path and the picker stays (the
+    # PWD or emit a path. `y` only copies the path and the picker stays (the
     # footer confirms it with the copied path). `v` previews inside the picker
     # under fzf `execute`: fzf is suspended, `view` (or a fallback) owns the
     # popup/terminal, and the picker is restored untouched when the viewer
@@ -1331,14 +1344,21 @@ COPYFOOTER
     # while the viewer runs (fzf's own border disappears on execute). `e` edits
     # and exits fzf without emitting a path: inside tmux the editor opens in a
     # new fullscreen window and fzf aborts; without tmux the editor runs in the
-    # current terminal and fzf aborts when it finishes.
+    # current terminal and fzf aborts when it finishes. `g` hands the selected
+    # entry to open_git_repo.sh, which opens the containing repository in the
+    # first available gitui/ziggity/lazygit; inside tmux the tool runs in a new
+    # window and the picker aborts immediately, without tmux it runs in the
+    # current terminal and aborts when it exits. Entries outside a repository
+    # leave the picker open.
     # fzf passes execute/reload/preview actions to a shell. Quote SELF with
     # printf %q so an install path containing spaces or metacharacters stays a
     # single command word (plain double quotes would still let a `$` expand).
     local _QSELF=$(printf '%q' "$SELF")
+    local _QGIT=$(printf '%q' "$SCRIPT_DIR/open_git_repo.sh")
     local -a ACTION_KEY_BINDS=(
-        --bind "c:execute-silent($_QSELF \"$TOPIC\" fzf-action copy {2})+transform:$_copy_footer {2}"
+        --bind "y:execute-silent($_QSELF \"$TOPIC\" fzf-action copy {2})+transform:$_copy_footer {2}"
         --bind "v:execute($_QSELF \"$TOPIC\" fzf-action view {2})"
+        --bind "g:execute($_QGIT {2} '$_git_status')+transform:$_git_abort '$_git_status'"
     )
     if [[ -n "$TMUX" ]]; then
         ACTION_KEY_BINDS+=(
@@ -1385,7 +1405,7 @@ COPYFOOTER
             --bind "$START_BIND" --bind "change:$CHANGE_BIND" --bind "/:$SEARCH_BIND" \
             --bind "x:$SEARCH_ACTION+clear-query+$SET_SEARCH+$FOOTER_ACTION" \
             --bind "esc:transform:$_esc_handler" \
-            --bind "j:down,k:up,h:backward-char,l:forward-char,g:first,G:last,q:abort" \
+            --bind "j:down,k:up,q:abort" \
             --bind "d:execute-silent($_QSELF \"$TOPIC\" internal-op del {})+$RELOAD_AND_FILTER" \
             --bind "r:execute-silent($_QSELF \"$TOPIC\" internal-op unbook {})+$RELOAD_AND_FILTER" \
             --bind "u:execute-silent($_QSELF \"$TOPIC\" internal-op undo)+$RELOAD_AND_FILTER" \
@@ -1460,17 +1480,17 @@ do_fzf_action() {
 
 NORMAL mode:
   ↵ Enter     - Accept selection (jump to directory / copy file path)
-  c           - Copy path to clipboard (footer confirms)
+  y           - Copy path to clipboard (footer confirms)
   v           - Preview file (view/netrw/less/cat), q to return
   e           - Edit with $EDITOR (opens in new tmux window if in tmux)
+  g           - Open the containing git repository in gitui/ziggity/lazygit and exit
   d           - Delete entry (moves to trash, undoable with u)
   r           - Remove bookmark (keep EMS history)
   u           - Undo last delete
   /           - Enter SEARCH mode
   s           - Toggle ordered/any-order multi-word matching
   x           - Clear query
-  j/k/h/l     - Vim navigation (down/up/left/right)
-  g/G         - First/Last entry
+  j/k         - Vim navigation (down/up)
   ?           - Show this help
   Esc         - Exit fzf
   q           - Quit (NORMAL mode)

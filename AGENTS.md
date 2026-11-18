@@ -28,7 +28,7 @@ Run only the checks relevant to the change; `docs/ACCEPTANCE.md` defines the
 full gates. Use a disposable `HOME` for database and CLI probes.
 
 ```bash
-bash -n scripts/frecency scripts/frecency-test scripts/bmark.sh shell/frecency.bash install.sh
+bash -n scripts/frecency scripts/frecency-test scripts/bmark.sh scripts/open_git_repo.sh shell/frecency.bash install.sh
 fish -n shell/frecency.fish
 scripts/frecency-test                 # SQLite/fzf dependency self-check (writes the sqlite cache)
 ./install.sh --dry-run --register     # preview install and registration
@@ -41,6 +41,8 @@ git diff --check
 - `scripts/frecency`: CLI, database schema/migrations, scoring, querying, preview and fzf UI.
 - `scripts/frecency-test`: SQLite capability checks and local binary selection.
 - `scripts/bmark.sh`: vifm bookmark helper.
+- `scripts/open_git_repo.sh`: NORMAL-mode `g` helper that opens the selected
+  entry's repository in gitui/ziggity/lazygit.
 - `install.sh`: installation, registration, dry-run, and uninstall behavior.
 - `frecency.vifm`, `shell/`, `nvim/`: integrations.
 - `bundled/`: static SQLite fallback binaries; preserve executable bits.

@@ -117,7 +117,7 @@ entry survives. `MAX_ENTRIES=0` disables automatic pruning for that table.
 
    Expected: preview identifies the missing path and offers the `d` cleanup
    action. Delete the row with `d`; the record should no longer appear. The
-   `c` key copies the selected path and does not remove missing paths; capacity
+   `y` key copies the selected path and does not remove missing paths; capacity
    cleanup is automatic after writes and can also be run with
    `frecency <topic> cleanup`.
 
@@ -224,9 +224,9 @@ Use a disposable `HOME` with `START_MODE=normal` in both `file.config` and
 `file_file.config`, and stubs for `wl-copy`, `$EDITOR`, and the viewer. Open a
 picker and check:
 
-1. `Enter` is the only key that emits a path. `c`, `v`, and `e` must never
+1. `Enter` is the only key that emits a path. `y`, `v`, `e`, and `g` must never
    print a path or change the shell's `$PWD`.
-2. `c` copies the raw selected path to the clipboard (no trailing newline) and
+2. `y` copies the raw selected path to the clipboard (no trailing newline) and
    fzf **stays open**. The footer shows `copied <path>`; switching entries and
    copying again updates the footer, so each copy is unambiguous. Verify with a
    path containing `)`, `,`, `+`, and backslashes — the footer must show the
@@ -248,8 +248,18 @@ picker and check:
    tmux it runs in the current terminal. In both cases `:q` returns to the
    shell, not to fzf.
 6. `C`, `V`, and `E` are no longer bound and must do nothing.
-7. In SEARCH mode the characters `c`, `v`, `e` only filter text and must not
-   trigger any of the actions.
+7. `g` runs `scripts/open_git_repo.sh` on the selected entry. Inside a git
+   repository it starts the first available `gitui` → `ziggity` → `lazygit`
+   with the repository root as `$PWD`. Inside tmux the tool opens in a new
+   window and fzf exits immediately (like `e`); without tmux it runs in the
+   current terminal and fzf exits when the TUI exits. For an entry outside any
+   repository it reports the problem and leaves fzf open. Stub the tools on an
+   isolated `PATH` and verify the priority order and the working directory.
+   Files use their parent directory; directories are checked directly.
+8. `h`, `l`, and `G` are unbound: the list is a single vertical column and
+   there is no first/last shortcut. `j`/`k` move down/up only.
+9. In SEARCH mode the characters `y`, `v`, `e`, and `g` only filter text and
+   must not trigger any of the actions.
 
 ## fzf footer and help
 
@@ -258,7 +268,7 @@ to roughly the left half). With a disposable `HOME`:
 
 1. Default `START_MODE=search`: the footer shows only `Esc Normal  ? Help`.
 2. Press `Esc`: NORMAL shows the full action list on two lines (`↵ Accept`,
-   `c Copy`, `v View`, `e Edit`, then `d Del`, `u Undo`, `r Unbook`,
+   `y Copy`, `v View`, `e Edit`, `g Git`, then `d Del`, `u Undo`, `r Unbook`,
    `/ Search`, `? Help`, `Esc Exit`). Press `/` and confirm the footer returns
    to `Esc Normal  ? Help`.
 3. With a two-word SQLite query, SEARCH shows only
@@ -372,7 +382,7 @@ later checks. UI and host integration behavior still requires manual testing.
 - Automated end-to-end checks for Bash, fish, Vifm, and Neovim host event
   behavior are not currently provided; those integrations need manual host
   testing.
-- The interactive `ji` picker and NORMAL-mode `c`/`v`/`e` actions need a real
+- The interactive `ji` picker and NORMAL-mode `y`/`v`/`e`/`g` actions need a real
   terminal and are not exercised by the automated capacity/CLI commands.
   (`C`/`V`/`E` are unbound.)
 - There is no supported command to reset a topic database or list its entries

@@ -134,11 +134,14 @@ only ticks on real navigation events, not on wall time).
   gives syntax highlighting; eza/bat/highlight improve previews), wl-copy /
   xclip (clipboard). `FRECENCY_VIEWER` overrides the viewer command (default
   chain: `view` → `$PAGER` → `less -R` → `cat`).
+- optional, for the `g` picker action: git plus one of `gitui`, `ziggity`, or
+  `lazygit`; the first one found in that order wins.
 
 ## Layout
 
 ```
-scripts/            frecency, frecency-test, bmark.sh  -> ~/.config/vifm/scripts/
+scripts/            frecency, frecency-test, bmark.sh, open_git_repo.sh
+                                                           -> ~/.config/vifm/scripts/
 frecency.vifm       vifm integration                   -> ~/.config/vifm/frecency.vifm
 shell/frecency.fish fish integration                   -> ~/.config/fish/frecency.fish
 shell/frecency.bash bash integration                    -> ~/.config/frecency/frecency.bash
@@ -237,27 +240,34 @@ Inside the frecency fzf UI (NORMAL mode; these keys only filter text in SEARCH m
 | `/` | enter SEARCH mode (prompt turns blue, Vim keys unbound) |
 | `Esc` | SEARCH → NORMAL, NORMAL → quit |
 | `q` | quit (NORMAL mode) |
-| `j k h l g G` | Vim navigation (NORMAL mode) |
+| `j k` | Vim navigation (down/up; the list is a single vertical column) |
 | `x` | clear query and start searching |
 | `d` | delete entry (trash table, undoable) |
 | `r` | remove keyword bookmark, keep path and EMS history |
 | `u` | undo last delete (shown after a delete) |
 | `s` | toggle ordered / any-order multi-word matching |
-| `c` | copy the selected path (no trailing newline); footer shows `copied <path>` and fzf stays |
+| `y` | copy the selected path (no trailing newline); footer shows `copied <path>` and fzf stays |
 | `v` | preview in the picker: `view` (syntax highlighting, netrw for directories) → `$PAGER` → `less -R` → `cat`, override with `FRECENCY_VIEWER`; `q` returns to fzf with the query and scroll position intact; in a tmux popup the rounded border stays visible during the preview (fzf >= 0.58) |
 | `e` | edit with `$EDITOR` (fallback `vi`) and exit fzf without emitting a path; inside tmux opens a new fullscreen window, otherwise runs in the current terminal |
+| `g` | open the git repository containing the selected entry in the first available `gitui`, `ziggity`, or `lazygit` and exit fzf; inside tmux the tool opens in a new window (like `e`), otherwise it runs in the current terminal; entries whose path and parent are outside a git repository leave the picker open |
 | `?` | show the full key map in a pager; when `$PAGER` is `cat` or unset it prefers `less -R`, and falls back to `cat` if no pager exists |
 | `Enter` | jump (the only key that emits a path and can change the shell's directory) |
 
 `v` uses fzf `execute`, which suspends the picker so the viewer owns the tmux
-popup or terminal and renders normally; `c` uses `execute-silent` and never
+popup or terminal and renders normally; `y` uses `execute-silent` and never
 takes over the terminal. In a tmux popup, fzf >= 0.58 lets tmux draw the
 rounded border so it remains visible while the `v` viewer runs; with older
 fzf the self-drawn border disappears during `execute`. The copied-path
 footer makes repeated copies unambiguous when switching between entries. `v`
 restores the picker untouched on exit, so you can walk through filtered
 entries one by one. `e` runs the editor and then aborts fzf **without emitting
-a path**, so the shell wrapper never `cd`s. The uppercase `C`/`V`/`E` bindings
+a path**, so the shell wrapper never `cd`s. `g` resolves the repository with
+`git -C <parent> rev-parse --show-toplevel` (a file uses its directory, a
+directory is checked directly), starts the first installed TUI in the order
+`gitui` → `ziggity` → `lazygit`, and aborts the picker once that tool has been
+launched; inside tmux the tool runs in a new window, otherwise in the current
+terminal. An entry outside a repository prints an error and leaves
+the picker open. The uppercase `C`/`V`/`E` bindings
 were removed; `Enter` remains the only navigation exit.
 
 Capacity cleanup is automatic after every write, so the old NORMAL-mode `C`
@@ -305,7 +315,7 @@ In the shell, `o` searches unified history while `j` and `J` query
 type-specific history. They only need `frecency` on `PATH` — the `~/.local/bin` symlink created by
 `--register` / `--bin-link` covers this.
 
-`Enter` in the picker is the only navigation exit; the fzf `c`/`e`/`v` actions
+`Enter` in the picker is the only navigation exit; the fzf `y`/`e`/`v`/`g` actions
 and the shell `jc`/`je` helpers are auxiliary actions and never change the
 current working directory.
 

@@ -3,7 +3,8 @@
 # install.sh - frecency installer
 # ============================================================================
 # Installs:
-#   scripts/frecency, scripts/frecency-test, scripts/bmark.sh
+#   scripts/frecency, scripts/frecency-test, scripts/bmark.sh,
+#   scripts/open_git_repo.sh
 #                                         -> ${XDG_CONFIG_HOME:-~/.config}/vifm/scripts/
 #   frecency.vifm                         -> ${XDG_CONFIG_HOME:-~/.config}/vifm/frecency.vifm
 #   bundled/sqlite3-<native arch>         -> vifm scripts/ (only when the system
@@ -64,7 +65,7 @@ case "$(uname -m)" in
     aarch64|arm64) ARCH="arm64"  ;;
 esac
 
-SCRIPTS=(frecency frecency-test bmark.sh)
+SCRIPTS=(frecency frecency-test bmark.sh open_git_repo.sh)
 # Both architecture binaries are removed by --uninstall (leftovers of older
 # installs that shipped both); only the native one is installed.
 BUNDLED_ALL=(sqlite3-x86_64 sqlite3-arm64)
