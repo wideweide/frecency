@@ -314,6 +314,16 @@ assert_rc "preview rc" 0 "$FRECENCY" file preview "$(printf '1\x1f2\x1f%s' "$HOM
 assert_contains "missing-path warning" "MISSING PATH" "$local_out"
 ok
 
+case_begin "internal-query caps rows and reports the total"
+init_topic file_dir
+seed_rows "$DB" dir_entries dir_tick 50
+out=$("$FRECENCY" file_dir internal-query all seed 5 1)
+assert_eq "header shows returned and total" "5/50 matches" "$(printf '%s\n' "$out" | head -1)"
+assert_eq "five rows plus the header" "6" "$(printf '%s\n' "$out" | wc -l)"
+assert_eq "limit 0 returns every match" "50" \
+    "$("$FRECENCY" file_dir internal-query all seed 0 | wc -l)"
+ok
+
 case_begin "LIKE patterns are escaped in queries"
 init_topic file
 mkdir -p "$HOME/p"

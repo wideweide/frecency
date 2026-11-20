@@ -372,6 +372,7 @@ MAX_ENTRIES=1000          # fallback capacity for each history table
 MAX_ENTRIES_UNIFIED=      # per-table override for the `entries` table
 MAX_ENTRIES_DIR=          # per-table override for `dir_entries`
 MAX_ENTRIES_FILE=         # per-table override for `file_entries`
+QUERY_LIMIT=32            # rows returned per picker query; 0 = no limit
 PRUNE_FILL_PERCENT=95     # trim target after overflow (50-100; default 95)
 MAX_PATH_CHARS=60         # weighted display width before list paths abbreviate
 START_MODE=search         # 'search' starts with prompt ready, 'normal' with Vim keys
@@ -404,13 +405,15 @@ entry. The three tables share `file.db`, so put the per-table limits and the
 fill percentage in `~/.local/share/frecency/file.config`; empty limits fall back
 to `MAX_ENTRIES`. Set a limit to `0` to disable pruning for that table. `LAMBDA`
 stays static per table; tune `MAX_ENTRIES`, not `LAMBDA`, if you want less or
-more retention. In `SEARCH_MODE=sqlite` every keystroke triggers a fresh
-full-list query, so reload cost grows roughly linearly with the table size;
-`SLEEP_DELAY` (default 0.02 s) is only a short debounce — fzf cancels superseded
-reloads — and does not make a very large table cheap. The 1000 default keeps
-this bounded; if you raise it beyond a few thousand rows, prefer
-`SEARCH_MODE=fzf`, which loads once and filters locally but loses query-aware
-grading. If an existing table already holds more than 1000 rows and has no
+more retention. In `SEARCH_MODE=sqlite` every keystroke triggers a fresh query.
+SQL still ranks all matching rows, but only the top `QUERY_LIMIT` (default 32)
+are formatted and sent to fzf; the picker header shows `shown/total matches` so
+you know how many were left out. `QUERY_LIMIT=0` returns every match (useful
+with `SEARCH_MODE=fzf`, which loads once and filters locally but loses
+query-aware grading). On a 16000-row table, limiting a broad query to 32 rows
+cut the reload from ~271 ms to ~72 ms in the manual benchmark. `SLEEP_DELAY`
+(default 0.02 s) is only a short debounce — fzf cancels superseded reloads. If
+an existing table already holds more than 1000 rows and has no
 explicit limit, the next write or cleanup trims it to the new fill level; set
 `MAX_ENTRIES` explicitly to keep a larger history. A low-probability background
 pass (about 1 in 200 writes) runs the same `cleanup` as a safety net for
@@ -483,8 +486,9 @@ releasing changes.
 
 ## Performance baseline
 
-`scripts/bench.sh` is a manual benchmark for the write, typed-jump and
-full-list-reload paths. It is not installed and is not part of CI:
+`scripts/bench.sh` is a manual benchmark for the write, typed-jump,
+full-list-reload and query-limit paths. It is not installed and is not part of
+CI:
 
 ```bash
 BENCH_ROOT=/dev/shm scripts/bench.sh     # tmpfs avoids slow fsync on some hosts

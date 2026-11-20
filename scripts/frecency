@@ -104,6 +104,7 @@ MAX_ENTRIES=            # fallback capacity; empty means 1000
 MAX_ENTRIES_UNIFIED=    # per-table override; empty falls back to MAX_ENTRIES
 MAX_ENTRIES_DIR=
 MAX_ENTRIES_FILE=
+QUERY_LIMIT=32          # max rows returned per picker query; 0 = all matches
 PRUNE_FILL_PERCENT=     # trim target as a percentage of the limit; empty means 95
 _PRUNE_FILL_PERCENT=    # deprecated alias for PRUNE_FILL_PERCENT
 SLEEP_DELAY=0.02    # reload debounce for sqlite mode; fzf cancels superseded reloads
@@ -964,7 +965,7 @@ do_preview() {
 # Query
 # ============================================================================
 _do_internal_query() {
-    local mode="$1"; local term="$2"; local limit="${3:-}"
+    local mode="$1"; local term="$2"; local limit="${3:-}" header="${4:-}"
     _ensure_ready || return 1
     # score_cur = score aligned to the current tick. A stored score is only valid
     # at its own tick; ORDER BY score would compare scores from different moments
@@ -1042,10 +1043,18 @@ _do_internal_query() {
     # Output a display column plus the raw path column. fzf shows column 1 and
     # accepts column 2; sqlite mode searches full paths in SQL, so fzf can disable
     # local filtering without losing matching ability.
-    run_sql "$select_sql $where $order" | FRECENCY_QUERY="$([[ "$SEARCH_MODE" == "sqlite" ]] && printf '%s' "$term")" \
-        awk -F "$SEP" -v OFS="$SEP" -v max_path_chars="$MAX_PATH_CHARS" '
+    local prefix_sql=""
+    if [[ "$header" == "1" ]]; then
+        # First output row carries the total match count; fzf treats it as a
+        # header line (--header-lines=1), so it does not become a candidate.
+        prefix_sql="SELECT 'TOTAL', COUNT(*) FROM $ENTRY_TABLE $where;"$'\n'
+    fi
+    run_sql "$prefix_sql$select_sql $where $order" | FRECENCY_QUERY="$([[ "$SEARCH_MODE" == "sqlite" ]] && printf '%s' "$term")" \
+        awk -F "$SEP" -v OFS="$SEP" -v max_path_chars="$MAX_PATH_CHARS" -v show_header="$header" '
     BEGIN {
         IGNORECASE = 1
+        total = 0
+        n = 0
         query = ENVIRON["FRECENCY_QUERY"]
         nwords = split(query, words, /[[:space:]]+/)
         for (wi = 1; wi <= nwords; wi++) {
@@ -1061,6 +1070,7 @@ _do_internal_query() {
         }
         if (match_re != "") match_re = "(" match_re ")"
     }
+    $1 == "TOTAL" { total = $2 + 0; next }
     function highlight(value,    rest,out) {
         if (match_re == "") return value
         rest = value
@@ -1120,7 +1130,11 @@ _do_internal_query() {
         prefix = $3
         if ($1 != "" && match_re == "") prefix = sprintf("\033[33m%s\033[0m", prefix)
         shown = (path_chars(full) > max_path_chars ? shorten(full, max_path_chars) : full)
-        print highlight(prefix "  " shown), full
+        rows[++n] = highlight(prefix "  " shown) OFS full
+    }
+    END {
+        if (show_header == 1) printf "%d/%d matches\n", n, total
+        for (i = 1; i <= n; i++) print rows[i]
     }'
 }
 
@@ -1425,28 +1439,28 @@ GITABORT
     [[ "$START_MODE" == "normal" ]] && START_BIND="start:disable-search+change-prompt($P_NORMAL)+$SET_NORMAL"
 
     local SEARCH_BIND="$SEARCH_ACTION+unbind($VIM_NAV)+change-prompt($P_SEARCH)+$SET_SEARCH+$FOOTER_ACTION"
-    [[ "$START_DATA" == "last" ]] && SEARCH_BIND="$SEARCH_BIND+transform:test -z '{q}' && echo 'reload($_QSELF \"$TOPIC\" internal-query all)' || echo 'nop'"
+    [[ "$START_DATA" == "last" ]] && SEARCH_BIND="$SEARCH_BIND+transform:test -z '{q}' && echo 'reload($_QSELF \"$TOPIC\" internal-query all $QUERY_LIMIT 1)' || echo 'nop'"
 
     local CHANGE_BIND="first"
     # fzf cancels the previous reload when a new one starts, so a short debounce
     # keeps fast typing from piling up queries without adding a fixed 60 ms tax
     # to every keystroke.
-    [[ "$SEARCH_MODE" == "sqlite" ]] && CHANGE_BIND="reload(sleep $SLEEP_DELAY; $_QSELF \"$TOPIC\" internal-query all {q} || true)+$CHANGE_BIND"
+    [[ "$SEARCH_MODE" == "sqlite" ]] && CHANGE_BIND="reload(sleep $SLEEP_DELAY; $_QSELF \"$TOPIC\" internal-query all {q} $QUERY_LIMIT 1 || true)+$CHANGE_BIND"
     CHANGE_BIND+="+$FOOTER_ACTION"
 
-    local RELOAD_AND_FILTER="reload($_QSELF \"$TOPIC\" internal-query $RELOAD_QUERY)+$SEARCH_ACTION+$SET_SEARCH+$FOOTER_ACTION"
+    local RELOAD_AND_FILTER="reload($_QSELF \"$TOPIC\" internal-query $RELOAD_QUERY $QUERY_LIMIT 1)+$SEARCH_ACTION+$SET_SEARCH+$FOOTER_ACTION"
 
     local -a ORDER_MODE_BIND=()
     if [[ "$SEARCH_MODE" == "sqlite" ]]; then
-        ORDER_MODE_BIND+=(--bind "s:execute-silent($_order_toggle '$_order_file')+reload($_QSELF \"$TOPIC\" internal-query all {q} || true)+$FOOTER_ACTION")
+        ORDER_MODE_BIND+=(--bind "s:execute-silent($_order_toggle '$_order_file')+reload($_QSELF \"$TOPIC\" internal-query all {q} $QUERY_LIMIT 1 || true)+$FOOTER_ACTION")
     fi
 
     # Keep only one fzf invocation: the two TERM branches had identical flags/bind,
     # and duplicated maintenance already caused one missed change (accept-nth).
     # Highlighting happens at the internal-query source and goes straight into fzf.
-    FRECENCY_ORDER_FILE="$_order_file" "$SELF" "$TOPIC" internal-query "$INITIAL_DATA" "$search_term" | \
+    FRECENCY_ORDER_FILE="$_order_file" "$SELF" "$TOPIC" internal-query "$INITIAL_DATA" "$search_term" "$QUERY_LIMIT" 1 | \
         FRECENCY_ORDER_FILE="$_order_file" fzf \
-            --ansi --query "$search_term" --footer "$FOOTER_STR" \
+            --ansi --query "$search_term" --footer "$FOOTER_STR" --header-lines=1 \
             --layout=reverse --tiebreak='index' --no-sort $tmux_opt \
             --preview-window=right:50% $border_opt --inline-info \
             --delimiter="$SEP" --accept-nth='2' "${FZF_VIEW_OPTS[@]}" --literal --exact \
@@ -1725,6 +1739,7 @@ for _T in "${TOPICS[@]}"; do
     MAX_ENTRIES_UNIFIED=
     MAX_ENTRIES_DIR=
     MAX_ENTRIES_FILE=
+    QUERY_LIMIT=32
     PRUNE_FILL_PERCENT=
     _PRUNE_FILL_PERCENT=
     _SHARED_LIMITS_LOADED=0
@@ -1741,6 +1756,7 @@ for _T in "${TOPICS[@]}"; do
         _is_num "$LAMBDA" || LAMBDA=$_lambda_default
         _is_num "$SLEEP_DELAY" || SLEEP_DELAY=0.02
         _is_uint "$UNDO_KEEP" || UNDO_KEEP=200
+        _is_uint "$QUERY_LIMIT" || QUERY_LIMIT=32
         _is_uint "$LAST_LIMIT" || LAST_LIMIT=15
         _is_uint "$MAX_PATH_CHARS" || MAX_PATH_CHARS=60
     fi

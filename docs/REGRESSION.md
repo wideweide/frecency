@@ -139,6 +139,30 @@ HOME="$test_home" scripts/frecency file cleanup
 Set `PRUNE_FILL_PERCENT=50` in the same config to verify the trim target changes
 to five rows; values outside 50-100 fall back to 95.
 
+## Query result cap
+
+The picker asks `internal-query` for at most `QUERY_LIMIT` rows (default 32);
+the first output line is a header `shown/total matches`, which fzf consumes via
+`--header-lines=1`. `QUERY_LIMIT=0` returns every match.
+
+```bash
+test_home=$(mktemp -d)
+mkdir -p "$test_home/.local/share/frecency"
+printf '%s\n' 'IGNORE_PATTERNS=()' > "$test_home/.local/share/frecency/file.config"
+HOME="$test_home" scripts/frecency file_dir init
+sqlite_bin=$(cat "$test_home/.local/share/frecency/.sqlite3.bin")
+"$sqlite_bin" "$test_home/.local/share/frecency/file.db" <<'SQL'
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 50)
+INSERT INTO dir_entries (content, keyword, score, visits, tick, last_access)
+SELECT '/seed/' || i, '', 1.0, 1, i, CURRENT_TIMESTAMP FROM n;
+UPDATE meta SET v = '50' WHERE k = 'dir_tick';
+SQL
+HOME="$test_home" scripts/frecency file_dir internal-query all seed 5 1 | head -1
+# expected: 5/50 matches
+HOME="$test_home" scripts/frecency file_dir internal-query all seed 0 | wc -l
+# expected: 50
+```
+
 ## No score-threshold cleanup
 
 Use a fresh disposable home; never run these probes on a real database.

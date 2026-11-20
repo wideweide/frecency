@@ -8,16 +8,23 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 - Branch: `main`. Use `git status -sb` and `git log --oneline -5` for the
   authoritative commit and working-tree state; no commit hash is recorded here.
 - Active task: none.
-- Last code change: P2 follow-ups. Added `scripts/bench.sh`, a manual
+- Last code change: added a configurable picker query cap. `QUERY_LIMIT`
+  defaults to 32: `_do_internal_query` still ranks all matches in SQL but
+  formats and returns only the top N, with a first `shown/total matches` header
+  line that fzf consumes via `--header-lines=1`. `QUERY_LIMIT=0` keeps the old
+  unlimited behavior. The manual bench now compares unlimited vs capped broad
+  queries; at 16000 rows a broad query dropped from ~271 ms to ~72 ms, at 1000
+  rows from ~44 ms to ~31 ms. A new CLI case checks the header and row counts;
+  28 cases pass.
+- Previous code change: P2 follow-ups. Added `scripts/bench.sh`, a manual
   disposable-`HOME` baseline (not installed, not in CI) that seeds
-  110/1000/16000 rows and reports `add`, typed `jump-handler` and full-list
-  reload timings. Reduced `SLEEP_DELAY` from 0.06 to 0.02 after a pty test
-  confirmed fzf cancels superseded reloads; real-fzf measurements at
+  110/1000/16000 rows and reports `add`, typed `jump-handler`, full-list reload
+  and query-limit timings. Reduced `SLEEP_DELAY` from 0.06 to 0.02 after a pty
+  test confirmed fzf cancels superseded reloads; real-fzf measurements at
   1500/3000/5000 rows showed per-keystroke latency dropping from
   ~213/265/315 ms to ~130-168/168/214 ms. README now documents the
-  sqlite-mode soft ceiling, the `SEARCH_MODE=fzf` trade-off, and the bench
-  script.
-- Previous code change: P0/P1 from the jghub cleanup/performance feedback.
+  sqlite-mode latency trade-offs and the bench script.
+- Earlier change: P0/P1 from the jghub cleanup/performance feedback.
   `do_cleanup()` now counts first and trims only when the non-bookmarked count
   exceeds `MAX_ENTRIES` (a pass at the limit is a no-op). The trim target is
   public as `PRUNE_FILL_PERCENT` (50-100, default 95; `_PRUNE_FILL_PERCENT`
@@ -27,7 +34,7 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
   `LIMIT` (best match uses 1), and a write collects every destination's
   post-write count in the same sqlite3 invocation as the upsert. Stale
   score-floor comments were removed. README, REGRESSION, and the CLI suite were
-  updated; 27 cases pass.
+  updated; 27 cases pass at that point.
 - Earlier change: added `tests/run-tests.sh` (20 CLI regression cases:
   capacity math incl. leading-zero/`0`/fill-level, write-protocol rejection,
   no-score-threshold invariant, config validation, shared per-table limits,
@@ -62,7 +69,9 @@ change; record the actual commands and results here.
 | P1 jump | in-process best match with SQL `LIMIT 1`; output matches exact/multi-word/no-match/empty; stub-fzf picker rc 0; loaded host ~72-89 -> ~42-47 ms/op (idle: 39 -> 28) | pass |
 | P2 bench | `BENCH_ROOT=/dev/shm scripts/bench.sh`: 110/1000/16000 rows -> add ~24-25 ms/op, typed jump ~26-28 ms/op, full reload ~17/25/174 ms/op | pass |
 | P2 latency | real fzf in a pty at 1500/3000/5000 rows: `SLEEP_DELAY=0.06` ~213/265/315 ms -> `0.02` ~130-168/168/214 ms; a pty probe confirmed fzf cancels superseded reloads | pass |
-| Tests | `bash -n` (7 scripts incl. `scripts/bench.sh`), `fish -n`, `tests/run-tests.sh` -> 27 passed, 0 failed | pass |
+| Query cap | `QUERY_LIMIT=32` + header: 16000-row broad query ~271 -> ~72 ms, 1000-row ~44 -> ~31 ms; header cost ~2 ms; real fzf pty showed `32/120 matches` | pass |
+| Query cap test | `internal-query all seed 5 1` emits `5/50 matches` plus 5 rows; limit `0` returns all 50 rows | pass |
+| Tests | `bash -n` (7 scripts incl. `scripts/bench.sh`), `fish -n`, `tests/run-tests.sh` -> 28 passed, 0 failed | pass |
 | Syntax | `bash -n` on `scripts/frecency`, `scripts/frecency-test`, `scripts/bmark.sh`, `shell/frecency.bash`, `install.sh` | pass |
 | Syntax | `fish -n shell/frecency.fish` | pass |
 | Whitespace | `git diff --check` | pass |
@@ -132,6 +141,15 @@ change; record the actual commands and results here.
 
 ## Recent changes
 
+- 2026-11-20 (query cap): added `QUERY_LIMIT` (default 32, `0` = unlimited).
+  `internal-query` still computes and orders every match in SQL, but formats
+  and outputs only the top N, with a leading `shown/total matches` header that
+  fzf consumes via `--header-lines=1`; `jump-handler` keeps its separate
+  `LIMIT 1` and emits no header. `scripts/bench.sh` now compares unlimited vs
+  capped broad queries: at 16000 rows ~271 -> ~72 ms, at 1000 rows ~44 -> ~31
+  ms, header overhead ~2 ms, and returned rows 16000/1000 -> 32. A real-fzf pty
+  check showed `32/120 matches` in the picker header. Added one CLI case for
+  the header/row counts (28 pass). README and REGRESSION updated.
 - 2026-11-20 (P2): finished the two deferred performance follow-ups. Added
   `scripts/bench.sh` (manual, not installed and not in CI) with a disposable
   `HOME`, seeded 110/1000/16000 rows and timings for `add`, typed

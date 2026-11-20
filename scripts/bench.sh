@@ -76,6 +76,15 @@ for n in "${ROWS_LIST[@]}"; do
     bench "add: existing path" 20 "$FRECENCY" file_dir add "/bench/dir$(( n / 2 ))"
     bench "jump-handler --emit=path <term>" 20 "$FRECENCY" \
         file_dir jump-handler --emit=path "dir$(( n / 2 ))"
-    bench "internal-query all (full reload)" 20 "$FRECENCY" \
-        file_dir internal-query all
+    bench "internal-query all (UI: 32 + header)" 20 "$FRECENCY" \
+        file_dir internal-query all "" 32 1
+    bench "query 'dir' unlimited" 20 "$FRECENCY" \
+        file_dir internal-query all dir 0
+    bench "query 'dir' limit 32" 20 "$FRECENCY" \
+        file_dir internal-query all dir 32
+    bench "query 'dir' limit 32 + header" 20 "$FRECENCY" \
+        file_dir internal-query all dir 32 1
+    printf '  rows returned: unlimited=%s, limit32=%s\n' \
+        "$("$FRECENCY" file_dir internal-query all dir 0 | wc -l)" \
+        "$("$FRECENCY" file_dir internal-query all dir 32 | wc -l)"
 done
