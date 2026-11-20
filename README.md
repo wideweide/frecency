@@ -407,9 +407,10 @@ to `MAX_ENTRIES`. Set a limit to `0` to disable pruning for that table. `LAMBDA`
 stays static per table; tune `MAX_ENTRIES`, not `LAMBDA`, if you want less or
 more retention. In `SEARCH_MODE=sqlite` every keystroke triggers a fresh query.
 SQL still ranks all matching rows, but only the top `QUERY_LIMIT` (default 32)
-are formatted and sent to fzf; the picker header shows `shown/total matches` so
-you know how many were left out. `QUERY_LIMIT=0` returns every match (useful
-with `SEARCH_MODE=fzf`, which loads once and filters locally but loses
+are formatted and sent to fzf; in NORMAL mode the prompt shows `< shown/total >`
+so you know how many were left out (fzf's own info line is hidden with
+`--info=hidden` so it cannot show the truncated count instead). `QUERY_LIMIT=0` returns every match
+(useful with `SEARCH_MODE=fzf`, which loads once and filters locally but loses
 query-aware grading). On a 16000-row table, limiting a broad query to 32 rows
 cut the reload from ~271 ms to ~72 ms in the manual benchmark. `SLEEP_DELAY`
 (default 0.02 s) is only a short debounce — fzf cancels superseded reloads. If
