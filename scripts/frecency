@@ -965,7 +965,7 @@ do_preview() {
 # Query
 # ============================================================================
 _do_internal_query() {
-    local mode="$1"; local term="$2"; local limit="${3:-}"
+    local mode="$1"; local term="$2"; local limit="${3:-}" total_flag="${4:-}"
     _ensure_ready || return 1
     # score_cur = score aligned to the current tick. A stored score is only valid
     # at its own tick; ORDER BY score would compare scores from different moments
@@ -1044,12 +1044,13 @@ _do_internal_query() {
     # accepts column 2; sqlite mode searches full paths in SQL, so fzf can disable
     # local filtering without losing matching ability.
     local total_sql=""
-    if [[ -n "${FRECENCY_COUNT_FILE:-}" ]]; then
-        # Consumed by awk (never printed): total matches for the current query.
+    if [[ "$total_flag" == "1" ]]; then
+        # Consumed by awk and emitted as a trailing TOTAL line; the UI strips it
+        # from the candidate list and uses it for the NORMAL-mode prompt.
         total_sql="SELECT 'TOTAL', COUNT(*) FROM $ENTRY_TABLE $where;"$'\n'
     fi
     run_sql "$total_sql$select_sql $where $order" | FRECENCY_QUERY="$([[ "$SEARCH_MODE" == "sqlite" ]] && printf '%s' "$term")" \
-        awk -F "$SEP" -v OFS="$SEP" -v max_path_chars="$MAX_PATH_CHARS" -v count_file="${FRECENCY_COUNT_FILE:-}" '
+        awk -F "$SEP" -v OFS="$SEP" -v max_path_chars="$MAX_PATH_CHARS" -v with_total="$total_flag" '
     BEGIN {
         IGNORECASE = 1
         total = 0
@@ -1132,8 +1133,8 @@ _do_internal_query() {
         rows[++n] = highlight(prefix "  " shown) OFS full
     }
     END {
-        if (count_file != "") printf "%d %d\n", n, total > count_file
         for (i = 1; i <= n; i++) print rows[i]
+        if (with_total == 1) printf "TOTAL %d\n", total
     }'
 }
 
@@ -1225,6 +1226,8 @@ do_query_ui() {
     local search_term="$1"
 
     local tmux_opt="" border_opt="--border=rounded" _tmux_border_saved=""
+    local _fzf_ver
+    _fzf_ver=$(fzf --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
     if [[ -n "$TMUX" ]]; then
         local _tmux_ver
         _tmux_ver=$(tmux -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
@@ -1234,8 +1237,6 @@ do_query_ui() {
             # the viewer (fzf's own border lives in the alternate screen it
             # leaves). Use a rounded native border to match fzf's look and
             # restore the setting on exit. Older fzf keeps the previous behavior.
-            local _fzf_ver
-            _fzf_ver=$(fzf --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
             if [[ -n "$_fzf_ver" ]] && (( $(_ver_num "$_fzf_ver") >= $(_ver_num "0.58.0") )); then
                 tmux_opt="--tmux 90%,80%,border-native"
                 border_opt="--border=none"
@@ -1306,29 +1307,26 @@ do_query_ui() {
     local _mode_file
     _mode_file=$(mktemp "${TMPDIR:-/tmp}/frecency_mode.XXXXXX")
     [[ "$START_MODE" == "normal" ]] && echo "normal" > "$_mode_file" || echo "search" > "$_mode_file"
-    local _count_file _cand_file
-    _count_file=$(mktemp "${TMPDIR:-/tmp}/frecency_count.XXXXXX")
+    local _cand_file
     _cand_file=$(mktemp "${TMPDIR:-/tmp}/frecency_candidates.XXXXXX")
-    : > "$_count_file"
-    local _prompt_handler="${_mode_file}.prompt"
+    local _ui_handler="${_mode_file}.ui"
+    local _info_handler="${_mode_file}.info"
     local _esc_handler="${_mode_file}.sh"
     local _order_toggle="${_mode_file}.toggle"
-    local _footer_handler="${_mode_file}.footer"
     local _copy_footer="${_mode_file}.copyfooter"
     local _git_status="${_mode_file}.gitstatus"
     local _git_abort="${_mode_file}.gitabort"
-    # The footer handler needs both the ordered/any-order state and the current
-    # NORMAL/SEARCH mode; pass the literal footer strings so there is one
-    # source of truth for both the initial --footer and every transform update.
-    local FOOTER_ACTION="transform:$_footer_handler {q} '$_order_file' '$SEARCH_MODE' '$_mode_file' '$FOOTER_NORMAL_L1' '$FOOTER_NORMAL_L2' '$FOOTER_SEARCH'"
-    local PROMPT_ACTION="transform:$_prompt_handler '$_count_file' '$_mode_file'"
+    # One transform updates both the footer and the NORMAL-mode prompt; it reads
+    # the ordered/any-order state, the current mode, and the trailing TOTAL line
+    # of the query result so the two displays never disagree.
+    local UI_ACTION="transform:$_ui_handler {q} '$_order_file' '$SEARCH_MODE' '$_mode_file' '$FOOTER_NORMAL_L1' '$FOOTER_NORMAL_L2' '$FOOTER_SEARCH'"
     cat > "$_esc_handler" <<ESCSCRIPT
 #!/bin/bash
 if [ "\$(cat "$_mode_file")" = normal ]; then
     echo abort
 else
     echo normal > "$_mode_file"
-    echo "disable-search+rebind($VIM_NAV)+$FOOTER_ACTION+$PROMPT_ACTION"
+    echo "disable-search+rebind($VIM_NAV)+$UI_ACTION"
 fi
 ESCSCRIPT
     chmod +x "$_esc_handler"
@@ -1342,39 +1340,56 @@ else
     printf 'ordered\n' > "$state_file"
 fi
 ORDERSCRIPT
-    cat > "$_footer_handler" <<'FOOTER_SCRIPT'
+    cat > "$_ui_handler" <<UISCRIPT
 #!/bin/bash
-query="$1"
-order_file="$2"
-search_mode="$3"
-mode_file="$4"
-normal_l1="$5"
-normal_l2="$6"
-search_footer="$7"
-IFS= read -r order < "$order_file" || order=ordered
-IFS= read -r mode < "$mode_file" || mode=search
-read -r -a words <<< "$query"
-if [[ "$search_mode" == sqlite && ${#words[@]} -ge 2 ]]; then
-    if [[ "$order" == any-order ]]; then
+query="\$1"
+order_file="\$2"
+search_mode="\$3"
+mode_file="\$4"
+normal_l1="\$5"
+normal_l2="\$6"
+search_footer="\$7"
+IFS= read -r order < "\$order_file" || order=ordered
+IFS= read -r mode < "\$mode_file" || mode=search
+read -r -a words <<< "\$query"
+if [[ "\$search_mode" == sqlite && \${#words[@]} -ge 2 ]]; then
+    if [[ "\$order" == any-order ]]; then
         order_label="ANY ORDER"
         switch_label="s→ORDERED"
     else
         order_label="ORDERED"
         switch_label="s→ANY ORDER"
     fi
-    if [[ "$mode" == normal ]]; then
-        printf 'change-footer(%s · %s\n%s\n%s)' "$order_label" "$switch_label" "$normal_l1" "$normal_l2"
+    if [[ "\$mode" == normal ]]; then
+        printf -v footer '%s · %s\n%s\n%s' "\$order_label" "\$switch_label" "\$normal_l1" "\$normal_l2"
     else
-        printf 'change-footer(%s · NORMAL %s)' "$order_label" "$switch_label"
+        printf -v footer '%s · NORMAL %s' "\$order_label" "\$switch_label"
     fi
 else
-    if [[ "$mode" == normal ]]; then
-        printf 'change-footer(%s\n%s)' "$normal_l1" "$normal_l2"
+    if [[ "\$mode" == normal ]]; then
+        printf -v footer '%s\n%s' "\$normal_l1" "\$normal_l2"
     else
-        printf 'change-footer(%s)' "$search_footer"
+        printf -v footer '%s' "\$search_footer"
     fi
 fi
-FOOTER_SCRIPT
+if [[ "\$mode" == normal ]]; then
+    printf 'change-footer(%s)+change-prompt($P_NORMAL)' "\$footer"
+else
+    printf 'change-footer(%s)+change-prompt($P_SEARCH)' "\$footer"
+fi
+UISCRIPT
+    cat > "$_info_handler" <<INFOSCRIPT
+#!/bin/bash
+# fzf runs this synchronously; use shell builtins only (no extra processes).
+cand_file="\$1"
+total=0
+while IFS= read -r line; do
+    case "\$line" in
+        TOTAL\ *) total=\${line#TOTAL } ;;
+    esac
+done < "\$cand_file"
+printf '%s/%s' "\${FZF_POS:-1}" "\$total"
+INFOSCRIPT
     cat > "$_copy_footer" <<'COPYFOOTER'
 #!/bin/bash
 # fzf does not expand {} placeholders inside change-footer, so emit the action
@@ -1393,20 +1408,8 @@ else
     echo nop
 fi
 GITABORT
-    cat > "$_prompt_handler" <<PROMPTSCRIPT
-#!/bin/bash
-count_file="\$1"
-mode_file="\$2"
-shown=0; total=0
-read -r shown total < "\$count_file" 2>/dev/null || true
-if [ "\$(cat "\$mode_file")" = normal ]; then
-    printf 'change-prompt($P_NORMAL < %s/%s > )' "\$shown" "\$total"
-else
-    printf 'change-prompt($P_SEARCH)'
-fi
-PROMPTSCRIPT
-    chmod +x "$_order_toggle" "$_footer_handler" "$_copy_footer" "$_git_abort" "$_prompt_handler"
-    trap 'rm -f "$_mode_file" "$_esc_handler" "$_order_file" "$_order_toggle" "$_footer_handler" "$_copy_footer" "$_git_status" "$_git_abort" "$_prompt_handler" "$_count_file" "$_cand_file"; [[ -z "$_tmux_border_saved" ]] || tmux set-option -g popup-border-lines "$_tmux_border_saved" 2>/dev/null || true' RETURN
+    chmod +x "$_order_toggle" "$_ui_handler" "$_info_handler" "$_copy_footer" "$_git_abort"
+    trap 'rm -f "$_mode_file" "$_esc_handler" "$_order_file" "$_order_toggle" "$_ui_handler" "$_info_handler" "$_copy_footer" "$_git_status" "$_git_abort" "$_cand_file"; [[ -z "$_tmux_border_saved" ]] || tmux set-option -g popup-border-lines "$_tmux_border_saved" 2>/dev/null || true' RETURN
 
     # All action keys use {2}, the raw path field, and never change the caller's
     # PWD or emit a path. `y` only copies the path and the picker stays (the
@@ -1427,10 +1430,9 @@ PROMPTSCRIPT
     # fzf passes execute/reload/preview actions to a shell. Quote SELF with
     # printf %q so an install path containing spaces or metacharacters stays a
     # single command word (plain double quotes would still let a `$` expand).
-    local _QSELF _QGIT _QCOUNT _QCAND
+    local _QSELF _QGIT _QCAND
     _QSELF=$(printf '%q' "$SELF")
     _QGIT=$(printf '%q' "$SCRIPT_DIR/open_git_repo.sh")
-    _QCOUNT=$(printf '%q' "$_count_file")
     _QCAND=$(printf '%q' "$_cand_file")
     local -a ACTION_KEY_BINDS=(
         --bind "y:execute-silent($_QSELF \"$TOPIC\" fzf-action copy {2})+transform:$_copy_footer {2}"
@@ -1453,42 +1455,49 @@ PROMPTSCRIPT
     # START_BIND sets the initial mode only. The initial --footer is already
     # correct for START_MODE and the initial query; do not transform it from
     # start, where {q} can still be empty and would overwrite a multi-word hint.
-    local START_BIND="start:$SEARCH_ACTION+unbind($VIM_NAV)+change-prompt($P_SEARCH)+$SET_SEARCH+$PROMPT_ACTION"
-    [[ "$START_MODE" == "normal" ]] && START_BIND="start:disable-search+change-prompt($P_NORMAL)+$SET_NORMAL+$PROMPT_ACTION"
+    local START_BIND="start:$SEARCH_ACTION+unbind($VIM_NAV)+change-prompt($P_SEARCH)+$SET_SEARCH+$UI_ACTION"
+    [[ "$START_MODE" == "normal" ]] && START_BIND="start:disable-search+change-prompt($P_NORMAL)+$SET_NORMAL+$UI_ACTION"
 
-    local SEARCH_BIND="$SEARCH_ACTION+unbind($VIM_NAV)+change-prompt($P_SEARCH)+$SET_SEARCH+$FOOTER_ACTION+$PROMPT_ACTION"
-    [[ "$START_DATA" == "last" ]] && SEARCH_BIND="$SEARCH_BIND+transform:test -z '{q}' && echo 'execute-silent(FRECENCY_COUNT_FILE=$_QCOUNT $_QSELF \"$TOPIC\" internal-query all $QUERY_LIMIT > $_QCAND || true)+reload(cat $_QCAND)' || echo 'nop'"
+    local SEARCH_BIND="$SEARCH_ACTION+unbind($VIM_NAV)+change-prompt($P_SEARCH)+$SET_SEARCH+$UI_ACTION"
+    [[ "$START_DATA" == "last" ]] && SEARCH_BIND="$SEARCH_BIND+transform:test -z '{q}' && echo 'execute-silent($_QSELF \"$TOPIC\" internal-query all $QUERY_LIMIT 1 > $_QCAND || true)+reload(sed '\$d' $_QCAND)' || echo 'nop'"
 
     local CHANGE_BIND="first"
     # fzf cancels the previous reload when a new one starts, so a short debounce
     # keeps fast typing from piling up queries without adding a fixed 60 ms tax
-    # to every keystroke. The query writes the candidate file and the count file
-    # synchronously (execute-silent), then reload and the prompt transform read
-    # the fresh results.
+    # to every keystroke. The query writes candidates plus a trailing TOTAL line
+    # into one file synchronously (execute-silent); reload strips that line and
+    # the prompt transform reads it, so both stay fresh without a second file.
     if [[ "$SEARCH_MODE" == "sqlite" ]]; then
-        CHANGE_BIND="execute-silent(sleep $SLEEP_DELAY; FRECENCY_COUNT_FILE=$_QCOUNT $_QSELF \"$TOPIC\" internal-query all {q} $QUERY_LIMIT > $_QCAND || true)+reload(cat $_QCAND)+$CHANGE_BIND"
+        CHANGE_BIND="execute-silent(sleep $SLEEP_DELAY; $_QSELF \"$TOPIC\" internal-query all {q} $QUERY_LIMIT 1 > $_QCAND || true)+reload(sed '\$d' $_QCAND)+$CHANGE_BIND"
     fi
-    CHANGE_BIND+="+$FOOTER_ACTION+$PROMPT_ACTION"
+    CHANGE_BIND+="+$UI_ACTION"
 
-    local RELOAD_AND_FILTER="execute-silent(FRECENCY_COUNT_FILE=$_QCOUNT $_QSELF \"$TOPIC\" internal-query $RELOAD_QUERY $QUERY_LIMIT > $_QCAND || true)+reload(cat $_QCAND)+$SEARCH_ACTION+$SET_SEARCH+$FOOTER_ACTION+$PROMPT_ACTION"
+    local RELOAD_AND_FILTER="execute-silent($_QSELF \"$TOPIC\" internal-query $RELOAD_QUERY $QUERY_LIMIT 1 > $_QCAND || true)+reload(sed '\$d' $_QCAND)+$SEARCH_ACTION+$SET_SEARCH+$UI_ACTION"
 
     local -a ORDER_MODE_BIND=()
     if [[ "$SEARCH_MODE" == "sqlite" ]]; then
-        ORDER_MODE_BIND+=(--bind "s:execute-silent($_order_toggle '$_order_file')+execute-silent(FRECENCY_COUNT_FILE=$_QCOUNT $_QSELF \"$TOPIC\" internal-query all {q} $QUERY_LIMIT > $_QCAND || true)+reload(cat $_QCAND)+$FOOTER_ACTION+$PROMPT_ACTION")
+        ORDER_MODE_BIND+=(--bind "s:execute-silent($_order_toggle '$_order_file')+execute-silent($_QSELF \"$TOPIC\" internal-query all {q} $QUERY_LIMIT 1 > $_QCAND || true)+reload(sed '\$d' $_QCAND)+$UI_ACTION")
+    fi
+
+    # fzf >= 0.54 can customize the info line; older versions keep the native
+    # counter (which only knows the capped 32 candidates).
+    local -a _info_opts=(--info=inline)
+    if [[ -n "$_fzf_ver" ]] && (( $(_ver_num "$_fzf_ver") >= $(_ver_num "0.54.0") )); then
+        _info_opts+=(--info-command="$_info_handler '$_cand_file'")
     fi
 
     # Keep only one fzf invocation: the two TERM branches had identical flags/bind,
     # and duplicated maintenance already caused one missed change (accept-nth).
     # Highlighting happens at the internal-query source and goes straight into fzf.
-    FRECENCY_ORDER_FILE="$_order_file" FRECENCY_COUNT_FILE="$_count_file" \
-        "$SELF" "$TOPIC" internal-query "$INITIAL_DATA" "$search_term" "$QUERY_LIMIT" > "$_cand_file"
+    FRECENCY_ORDER_FILE="$_order_file" \
+        "$SELF" "$TOPIC" internal-query "$INITIAL_DATA" "$search_term" "$QUERY_LIMIT" 1 > "$_cand_file"
     FRECENCY_ORDER_FILE="$_order_file" fzf < "$_cand_file" \
             --ansi --query "$search_term" --footer "$FOOTER_STR" \
             --layout=reverse --tiebreak='index' --no-sort $tmux_opt \
-            --preview-window=right:50% $border_opt --info=hidden \
+            --preview-window=right:50% $border_opt "${_info_opts[@]}" \
             --delimiter="$SEP" --accept-nth='2' "${FZF_VIEW_OPTS[@]}" --literal --exact \
             --bind "$START_BIND" --bind "change:$CHANGE_BIND" --bind "/:$SEARCH_BIND" \
-            --bind "x:$SEARCH_ACTION+clear-query+$SET_SEARCH+$FOOTER_ACTION+$PROMPT_ACTION" \
+            --bind "x:$SEARCH_ACTION+clear-query+$SET_SEARCH+$UI_ACTION" \
             --bind "esc:transform:$_esc_handler" \
             --bind "j:down,k:up,q:abort" \
             --bind "d:execute-silent($_QSELF \"$TOPIC\" internal-op del {})+$RELOAD_AND_FILTER" \

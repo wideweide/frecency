@@ -314,13 +314,13 @@ assert_rc "preview rc" 0 "$FRECENCY" file preview "$(printf '1\x1f2\x1f%s' "$HOM
 assert_contains "missing-path warning" "MISSING PATH" "$local_out"
 ok
 
-case_begin "internal-query caps rows and writes the count file"
+case_begin "internal-query caps rows and reports the total in the result"
 init_topic file_dir
 seed_rows "$DB" dir_entries dir_tick 50
-count_file="$CURRENT_TD/count"
-out=$(FRECENCY_COUNT_FILE="$count_file" "$FRECENCY" file_dir internal-query all seed 5)
-assert_eq "five rows returned" "5" "$(printf '%s\n' "$out" | wc -l)"
-assert_eq "count file has shown and total" "5 50" "$(cat "$count_file")"
+out=$("$FRECENCY" file_dir internal-query all seed 5 1)
+assert_eq "five candidates plus the TOTAL line" "6" "$(printf '%s\n' "$out" | wc -l)"
+assert_eq "TOTAL line carries the match count" "TOTAL 50" "$(printf '%s\n' "$out" | tail -1)"
+assert_eq "stripping TOTAL leaves five rows" "5" "$(printf '%s\n' "$out" | sed '$d' | wc -l)"
 assert_eq "no header line in output" "" "$(printf '%s\n' "$out" | grep -F 'matches' || true)"
 assert_eq "limit 0 returns every match" "50" \
     "$("$FRECENCY" file_dir internal-query all seed 0 | wc -l)"

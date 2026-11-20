@@ -10,14 +10,15 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 - Active task: none.
 - Last code change: added a configurable picker query cap. `QUERY_LIMIT`
   defaults to 32: `_do_internal_query` still ranks all matches in SQL but
-  formats and returns only the top N. When `FRECENCY_COUNT_FILE` is set it
-  writes `shown total` to that file, and the picker's NORMAL-mode prompt shows
-  `< shown/total >`; fzf's own info line is hidden (`--info=hidden`) so it
-  cannot show the truncated count instead. No header line pollutes the candidate list.
-  `QUERY_LIMIT=0` keeps the old unlimited behavior. The manual bench compares
-  unlimited vs capped broad queries: at 16000 rows a broad query dropped from
-  ~271 ms to ~72 ms, at 1000 rows from ~44 ms to ~31 ms. A new CLI case checks
-  the count file and row counts; 28 cases pass.
+  formats and returns only the top N, appending `TOTAL n` to its own result.
+  The UI strips that line before fzf and, with fzf >= 0.54, uses `--info-command`
+  to render the native info line as `< 1/n ────` in both SEARCH and NORMAL,
+  restoring the original prompt/info/separator style. A single combined transform
+  updates footer and prompt, which keeps `Esc` switching back to NORMAL.
+  `QUERY_LIMIT=0` keeps the old unlimited behavior. The manual
+  bench compares unlimited vs capped broad queries: at 16000 rows a broad query
+  dropped from ~271 ms to ~72 ms, at 1000 rows from ~44 ms to ~31 ms. A new CLI
+  case checks the trailing TOTAL line and row counts; 28 cases pass.
 - Previous code change: P2 follow-ups. Added `scripts/bench.sh`, a manual
   disposable-`HOME` baseline (not installed, not in CI) that seeds
   110/1000/16000 rows and reports `add`, typed `jump-handler`, full-list reload
@@ -71,8 +72,8 @@ change; record the actual commands and results here.
 | P1 jump | in-process best match with SQL `LIMIT 1`; output matches exact/multi-word/no-match/empty; stub-fzf picker rc 0; loaded host ~72-89 -> ~42-47 ms/op (idle: 39 -> 28) | pass |
 | P2 bench | `BENCH_ROOT=/dev/shm scripts/bench.sh`: 110/1000/16000 rows -> add ~24-25 ms/op, typed jump ~26-28 ms/op, full reload ~17/25/174 ms/op | pass |
 | P2 latency | real fzf in a pty at 1500/3000/5000 rows: `SLEEP_DELAY=0.06` ~213/265/315 ms -> `0.02` ~130-168/168/214 ms; a pty probe confirmed fzf cancels superseded reloads | pass |
-| Query cap | `QUERY_LIMIT=32` + count file: 16000-row broad query ~271 -> ~72 ms, 1000-row ~44 -> ~31 ms; fzf info line hidden (`--info=hidden`); real fzf pty showed `32/120` in the NORMAL prompt and no `matches` header | pass |
-| Query cap test | `internal-query all seed 5` writes `5 50` to `FRECENCY_COUNT_FILE` and emits 5 rows with no `matches` header; limit `0` returns all 50 rows | pass |
+| Query cap | `QUERY_LIMIT=32` + trailing `TOTAL n`: 16000-row broad query ~271 -> ~72 ms, 1000-row ~44 -> ~31 ms; fzf 0.72 pty showed ` < 1/120 ────` in both SEARCH and NORMAL, plus working `Esc` and footer | pass |
+| Query cap test | `internal-query all seed 5 1` emits 5 candidates plus `TOTAL 50`; `sed '$d'` leaves 5 rows; limit `0` returns all 50 rows | pass |
 | Tests | `bash -n` (7 scripts incl. `scripts/bench.sh`), `fish -n`, `tests/run-tests.sh` -> 28 passed, 0 failed | pass |
 | Syntax | `bash -n` on `scripts/frecency`, `scripts/frecency-test`, `scripts/bmark.sh`, `shell/frecency.bash`, `install.sh` | pass |
 | Syntax | `fish -n shell/frecency.fish` | pass |
@@ -145,17 +146,19 @@ change; record the actual commands and results here.
 
 - 2026-11-20 (query cap): added `QUERY_LIMIT` (default 32, `0` = unlimited).
   `internal-query` still computes and orders every match in SQL, but formats
-  and outputs only the top N. Instead of a candidate-list header, it writes
-  `shown total` to `FRECENCY_COUNT_FILE` when set; the picker's NORMAL-mode
-  prompt displays `< shown/total >` via a generated transform, and fzf's
-  `--info=hidden` removes its own (truncated) count.
-  `jump-handler` keeps its separate `LIMIT 1`. The query is now run
-  synchronously into a candidate file before `reload(cat ...)` so the count and
-  prompt are fresh on every keystroke. `scripts/bench.sh` compares unlimited vs
-  capped queries: at 16000 rows ~271 -> ~72 ms, at 1000 rows ~44 -> ~31 ms.
-  A real-fzf pty check showed `32/120` in the NORMAL prompt and no separate
-  header. Added one CLI case for the count file/row counts (28 pass). README
-  and REGRESSION updated.
+  and outputs only the top N, appending `TOTAL n` to its own result when asked.
+  The UI strips that line before fzf (`reload(sed '$d' ...)`), and on fzf >= 0.54
+  a generated `--info-command` renders the native info line as `< 1/n ────`,
+  keeping the original prompt/info/separator style in both modes. No side-channel
+  count file is used. `jump-handler` keeps its separate `LIMIT 1` and emits no
+  TOTAL line. The query is run synchronously into one candidate file before
+  reload so the info line is fresh on every keystroke. `scripts/bench.sh`
+  compares unlimited vs capped queries: at 16000 rows ~271 -> ~72 ms, at 1000
+  rows ~44 -> ~31 ms. A real-fzf pty check showed ` < 1/120 ────` in SEARCH and
+  NORMAL, no `32/32`, no visible `TOTAL`, and `Esc` switching SEARCH -> NORMAL.
+  The footer and prompt are updated by one combined transform, which fixed the
+  Esc regression. Added one CLI case for the TOTAL line/row counts (28 pass).
+  README and REGRESSION updated.
 - 2026-11-20 (P2): finished the two deferred performance follow-ups. Added
   `scripts/bench.sh` (manual, not installed and not in CI) with a disposable
   `HOME`, seeded 110/1000/16000 rows and timings for `add`, typed

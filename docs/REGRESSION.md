@@ -142,11 +142,11 @@ to five rows; values outside 50-100 fall back to 95.
 ## Query result cap
 
 The picker asks `internal-query` for at most `QUERY_LIMIT` rows (default 32).
-When `FRECENCY_COUNT_FILE` is set, the query writes `shown total` to that file;
-the UI's NORMAL-mode prompt shows `< shown/total >` from it, and fzf's own info
-line is hidden (`--info=hidden`) so it cannot display the truncated count
-instead. No header
-line is emitted into the candidate list. `QUERY_LIMIT=0` returns every match.
+With the fourth argument `1`, the query appends `TOTAL n` to its own result; the
+UI strips that line before handing candidates to fzf. With fzf >= 0.54 the INFO
+line is rendered as `< 1/n ────` via `--info-command`, so both SEARCH and NORMAL
+modes keep the original prompt/info/separator look while showing the real total
+instead of fzf's `1/32`. `QUERY_LIMIT=0` returns every match.
 
 ```bash
 test_home=$(mktemp -d)
@@ -160,11 +160,10 @@ INSERT INTO dir_entries (content, keyword, score, visits, tick, last_access)
 SELECT '/seed/' || i, '', 1.0, 1, i, CURRENT_TIMESTAMP FROM n;
 UPDATE meta SET v = '50' WHERE k = 'dir_tick';
 SQL
-FRECENCY_COUNT_FILE="$test_home/count" HOME="$test_home" \
-  scripts/frecency file_dir internal-query all seed 5 | wc -l
-# expected: 5 candidate lines (no header)
-cat "$test_home/count"
-# expected: 5 50
+HOME="$test_home" scripts/frecency file_dir internal-query all seed 5 1 | wc -l
+# expected: 6 (5 candidates plus TOTAL 50)
+HOME="$test_home" scripts/frecency file_dir internal-query all seed 5 1 | tail -1
+# expected: TOTAL 50
 HOME="$test_home" scripts/frecency file_dir internal-query all seed 0 | wc -l
 # expected: 50
 ```
