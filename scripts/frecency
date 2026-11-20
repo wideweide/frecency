@@ -26,8 +26,8 @@
 #   cannot be compared directly. Sorting / cleanup / display always use current,
 #   aligning every entry to the same moment.
 #   Maintenance is capacity-based only: the table is capped at MAX_ENTRIES
-#   (trimming to 90% of it). There is no score threshold: a low score only
-#   affects ranking, never retention.
+#   (trimming to PRUNE_FILL_PERCENT of it, 95% by default). There is no score
+#   threshold: a low score only affects ranking, never retention.
 #   Half-life = ln(2)/LAMBDA visits. The unified `file` history pools
 #   directory visits and file opens, so it defaults to LAMBDA=0.005 (about
 #   139 visits); other topics keep 0.01 (about 69 visits).
@@ -50,7 +50,7 @@
 #                                              : exit 0 if the entry <content>
 #                                                (any entry when omitted) was
 #                                                updated within the last N seconds
-#    frecency <topic> cleanup                  : manual score + capacity maintenance
+#    frecency <topic> cleanup                  : manual capacity maintenance
 #
 # The generic interface accepts comma-separated topics; `file`, `file_dir`, and
 # `file_file` share file.db and address the unified, directory, and file histories.
@@ -100,11 +100,12 @@ case "$(uname -m)" in
 esac
 
 # --- Default configuration (overridable by <topic>.config) ---
-MAX_ENTRIES=            # fallback capacity; empty means 1500
+MAX_ENTRIES=            # fallback capacity; empty means 1000
 MAX_ENTRIES_UNIFIED=    # per-table override; empty falls back to MAX_ENTRIES
 MAX_ENTRIES_DIR=
 MAX_ENTRIES_FILE=
-_PRUNE_FILL_PERCENT=90  # prune down to this percentage of the limit
+PRUNE_FILL_PERCENT=     # trim target as a percentage of the limit; empty means 95
+_PRUNE_FILL_PERCENT=    # deprecated alias for PRUNE_FILL_PERCENT
 SLEEP_DELAY=0.06    # reload debounce for sqlite mode; a query takes ~25ms, so 0.2 is pure lag
 START_DATA=all      # 'last' recent entries / 'all' everything
 START_MODE=search   # 'normal' (Vim keys) / 'search' (type directly)
@@ -347,13 +348,13 @@ shq() { local s=${1//\'/\'\\\'\'}; printf '%s' "$s"; }
 _is_uint() { [[ ${1:-} =~ ^(0|[1-9][0-9]*)$ ]]; }
 # Arithmetic-safe decimal value (belt-and-braces for config coming from source).
 # Must use $(( )) arithmetic: printf '%d' parses with strtol and silently stops
-# at the '#' ("10#1500" -> 10), which made capacity cleanup prune to 1 row.
+# at the '#' ("10#1000" -> 10), which made capacity cleanup prune to 1 row.
 _dec() { printf '%s' "$(( 10#${1:-0} ))"; }
 # Non-negative decimal number (integer or float), for SLEEP_DELAY / LAMBDA.
 _is_num() { [[ ${1:-} =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; }
 
 # The three file.db tables share file.config for their per-table limits and
-# score floors. When a split topic (file_dir/file_file) is invoked directly,
+# trim target. When a split topic (file_dir/file_file) is invoked directly,
 # pick up those values from file.config without changing the rest of that
 # topic's configuration.
 _SHARED_LIMITS_LOADED=0
@@ -363,24 +364,40 @@ _load_shared_file_limits() {
     [[ "$CONFIG_PATH" == "$DATA_DIR/file.config" ]] && return 0
     [[ -f "$DATA_DIR/file.config" ]] || return 0
     _SHARED_LIMITS_LOADED=1
-    local vals base uni dir file
+    local vals base uni dir file pct legacy_pct
     vals=$( ( source "$DATA_DIR/file.config" >/dev/null 2>&1
               printf '%s\n' \
                   "${MAX_ENTRIES-}" "${MAX_ENTRIES_UNIFIED-}" \
-                  "${MAX_ENTRIES_DIR-}" "${MAX_ENTRIES_FILE-}" ) 2>/dev/null ) || return 0
-    { IFS= read -r base; IFS= read -r uni; IFS= read -r dir; IFS= read -r file; } <<< "$vals"
+                  "${MAX_ENTRIES_DIR-}" "${MAX_ENTRIES_FILE-}" \
+                  "${PRUNE_FILL_PERCENT-}" "${_PRUNE_FILL_PERCENT-}" ) 2>/dev/null ) || return 0
+    { IFS= read -r base; IFS= read -r uni; IFS= read -r dir; IFS= read -r file
+      IFS= read -r pct; IFS= read -r legacy_pct; } <<< "$vals"
     [[ -n "${MAX_ENTRIES:-}" ]] || MAX_ENTRIES=$base
     [[ -n "${MAX_ENTRIES_UNIFIED:-}" ]] || MAX_ENTRIES_UNIFIED=$uni
     [[ -n "${MAX_ENTRIES_DIR:-}" ]] || MAX_ENTRIES_DIR=$dir
     [[ -n "${MAX_ENTRIES_FILE:-}" ]] || MAX_ENTRIES_FILE=$file
+    [[ -n "${PRUNE_FILL_PERCENT:-}" ]] || PRUNE_FILL_PERCENT=$pct
+    [[ -n "${_PRUNE_FILL_PERCENT:-}" ]] || _PRUNE_FILL_PERCENT=$legacy_pct
+}
+
+# Trim target as a percentage of the capacity limit. Empty or invalid values
+# (outside 50..100) fall back to 95. The pre-release `_PRUNE_FILL_PERCENT` name
+# is still accepted as a fallback alias.
+_prune_fill_percent() {
+    _load_shared_file_limits
+    local pct="${PRUNE_FILL_PERCENT:-}"
+    [[ -n "$pct" ]] || pct="${_PRUNE_FILL_PERCENT:-}"
+    _is_uint "$pct" || pct=95
+    (( pct >= 50 && pct <= 100 )) || pct=95
+    printf '%s' "$pct"
 }
 
 # Capacity limit for a history destination. Empty per-table values fall back to
 # MAX_ENTRIES; 0 disables automatic pruning for that table.
 _limit_for_dest() {
     _load_shared_file_limits
-    local base="${MAX_ENTRIES:-1500}"
-    _is_uint "$base" || base=1500
+    local base="${MAX_ENTRIES:-1000}"
+    _is_uint "$base" || base=1000
     case "$1" in
         unified) printf '%s' "${MAX_ENTRIES_UNIFIED:-$base}" ;;
         dir)     printf '%s' "${MAX_ENTRIES_DIR:-$base}" ;;
@@ -588,9 +605,9 @@ _decay_expr() {
     printf 'score * exp(-%s * %s)' "$LAMBDA" "$dt"
 }
 
-# Delete the lowest-scoring unbookmarked rows above `keep`. `protect` is the
-# content just written, so a new entry is not immediately removed by its own
-# capacity check.
+# Delete the unbookmarked rows that rank below `keep` (lowest current score
+# first). `protect` is the content just written, so a new entry is not
+# immediately removed by its own capacity check.
 _prune_table() {
     local table="$1" tick_key="$2" lambda="$3" keep="$4" protect="${5:-}"
     local protect_sql=""
@@ -611,12 +628,19 @@ DELETE FROM $table
 
 do_cleanup() {
     _ensure_ready || return 1
-    local limit keep
+    local limit keep n pct
     limit=$(_limit_for_dest "$(_dest_for_current_table)")
     if _is_uint "$limit" && (( $(_dec "$limit") > 0 )); then
-        keep=$(( $(_dec "$limit") * $(_dec "$_PRUNE_FILL_PERCENT") / 100 ))
-        (( keep >= 1 )) || keep=1
-        _prune_table "$ENTRY_TABLE" "$TICK_KEY" "$LAMBDA" "$keep" || return 1
+        # A maintenance pass must not shorten a table that is still below its
+        # capacity: the fill percentage is hysteresis, not a second cap. Only
+        # trim when the table actually exceeds MAX_ENTRIES.
+        n=$(run_sql "SELECT COUNT(*) FROM $ENTRY_TABLE WHERE keyword = '';")
+        if _is_uint "$n" && (( $(_dec "$n") > $(_dec "$limit") )); then
+            pct=$(_prune_fill_percent)
+            keep=$(( $(_dec "$limit") * pct / 100 ))
+            (( keep >= 1 )) || keep=1
+            _prune_table "$ENTRY_TABLE" "$TICK_KEY" "$LAMBDA" "$keep" || return 1
+        fi
     fi
     run_sql "
 DELETE FROM $TRASH_TABLE
@@ -651,7 +675,7 @@ COMMIT;
 }
 
 _do_upsert_route() {
-    local content="$1" keyword="$2" route_sql="BEGIN IMMEDIATE;" dest table tick_key lambda
+    local content="$1" keyword="$2" route_sql="BEGIN IMMEDIATE;" count_sql="" dest table tick_key lambda
     local -a dests=() tables=() ticks=() lambdas=()
     for dest in "${_route_targets[@]}"; do
         case "$dest" in
@@ -672,22 +696,28 @@ ON CONFLICT(content) DO UPDATE SET
     visits = visits + 1,
     tick = (SELECT CAST(v AS INTEGER) FROM meta WHERE k = '$tick_key'),
     last_access = CURRENT_TIMESTAMP;"
+        # Count inside the same transaction: one sqlite3 process serves the
+        # write and the capacity checks for every destination.
+        count_sql+="SELECT COUNT(*) FROM $table WHERE keyword = '';"$'\n'
     done
-    route_sql+=$'\nCOMMIT;'
+    route_sql+=$'\n'"$count_sql"$'\nCOMMIT;'
 
     # Pruning runs after the commit so the write lock is not held while sorting;
-    # a fresh count and the capacity check run for each destination written.
-    run_sql "$route_sql" >/dev/null || return 1
-    local i limit n keep
+    # the counts from the same invocation drive the capacity check.
+    local out i limit n keep pct
+    out=$(run_sql "$route_sql") || return 1
+    local -a counts=()
+    mapfile -t counts <<< "$out"
+    pct=$(_prune_fill_percent)
     for i in "${!dests[@]}"; do
-        n=$(run_sql "SELECT COUNT(*) FROM ${tables[$i]} WHERE keyword = '';")
+        n="${counts[$i]:-}"
         _is_uint "$n" || continue
         limit=$(_limit_for_dest "${dests[$i]}")
         _is_uint "$limit" || continue
         limit=$(_dec "$limit")
         (( limit > 0 )) || continue
         if (( $(_dec "$n") > limit )); then
-            keep=$(( limit * $(_dec "$_PRUNE_FILL_PERCENT") / 100 ))
+            keep=$(( limit * pct / 100 ))
             (( keep >= 1 )) || keep=1
             _prune_table "${tables[$i]}" "${ticks[$i]}" "${lambdas[$i]}" "$keep" "$content" || return 1
         fi
@@ -749,10 +779,10 @@ do_add() {
     _do_upsert_route "$content" "$keyword" || return 1
 
     # Low-frequency background maintenance: trim the undo table and act as a
-    # safety net for concurrent writers. It calls do_cleanup, so it runs the
-    # score floor before the capacity cap, just like the per-write path.
-    # Probabilistic (0.5%, about once every 200 writes); the normal per-write
-    # pruning above is unchanged.
+    # safety net for concurrent writers. do_cleanup only prunes a table that is
+    # actually over its capacity limit, so this pass cannot shorten a table that
+    # is still below it. Probabilistic (0.5%, about once every 200 writes); the
+    # normal per-write pruning above is unchanged.
     if (( RANDOM % 200 == 0 )); then
         for dest in "${_route_targets[@]}"; do
             case "$dest" in
@@ -934,7 +964,7 @@ do_preview() {
 # Query
 # ============================================================================
 _do_internal_query() {
-    local mode="$1"; local term="$2"
+    local mode="$1"; local term="$2"; local limit="${3:-}"
     _ensure_ready || return 1
     # score_cur = score aligned to the current tick. A stored score is only valid
     # at its own tick; ORDER BY score would compare scores from different moments
@@ -993,6 +1023,11 @@ _do_internal_query() {
         order="ORDER BY rank_grade ASC, score_cur DESC,
                LENGTH(content) ASC, last_access DESC"
         fi
+    fi
+    # Optional row cap for callers that only need the best match (jump-handler).
+    # `mode=last` already carries its own LIMIT.
+    if [[ "$mode" != "last" ]] && _is_uint "$limit" && (( $(_dec "$limit") > 0 )); then
+        order+=" LIMIT $(_dec "$limit")"
     fi
     local select_sql="SELECT
             keyword,
@@ -1556,13 +1591,15 @@ do_jump_handler() {
 
     if (( picker )); then
         # Interactive picker; an optional term becomes the initial fzf query.
-        res=$("$SELF" "$TOPIC" query "$term") || exit 0
+        # Call the UI function directly: command substitution still forks, but
+        # it no longer re-executes and re-parses this whole script.
+        res=$(do_query_ui "$term") || exit 0
         [[ -z "$res" ]] && exit 0
     elif [[ -n "$term" ]]; then
         # zoxide / ze semantics: with a query, skip fzf and take the best entry by
         # EMS + match grade (first internal-query row = highest grade, then highest
-        # score_cur within that grade).
-        res=$("$SELF" "$TOPIC" internal-query all "$term" | head -n 1)
+        # score_cur within that grade). The row cap keeps formatting O(1).
+        res=$(_do_internal_query all "$term" 1)
         if [[ -z "$res" ]]; then
             # The shell integrations pre-check `-` and existing paths, so a
             # non-empty term that reaches here matched nothing. Report it instead
@@ -1578,7 +1615,7 @@ do_jump_handler() {
             exit 0
         fi
     else
-        res=$("$SELF" "$TOPIC" query) || exit 0
+        res=$(do_query_ui) || exit 0
         [[ -z "$res" ]] && exit 0
     fi
     local raw_path="${res##*$SEP}"
@@ -1685,6 +1722,8 @@ for _T in "${TOPICS[@]}"; do
     MAX_ENTRIES_UNIFIED=
     MAX_ENTRIES_DIR=
     MAX_ENTRIES_FILE=
+    PRUNE_FILL_PERCENT=
+    _PRUNE_FILL_PERCENT=
     _SHARED_LIMITS_LOADED=0
     if [[ -f "$CONFIG_PATH" ]]; then
         # A config may accidentally change IFS, which would corrupt every later
@@ -1695,11 +1734,10 @@ for _T in "${TOPICS[@]}"; do
         source "$CONFIG_PATH"
         IFS="$_saved_ifs"
         # Validate numeric config before it reaches SQL or shell command strings.
+        # PRUNE_FILL_PERCENT is normalized by _prune_fill_percent() at use time.
         _is_num "$LAMBDA" || LAMBDA=$_lambda_default
         _is_num "$SLEEP_DELAY" || SLEEP_DELAY=0.06
         _is_uint "$UNDO_KEEP" || UNDO_KEEP=200
-        _is_uint "$_PRUNE_FILL_PERCENT" || _PRUNE_FILL_PERCENT=90
-        (( _PRUNE_FILL_PERCENT <= 100 )) || _PRUNE_FILL_PERCENT=90
         _is_uint "$LAST_LIMIT" || LAST_LIMIT=15
         _is_uint "$MAX_PATH_CHARS" || MAX_PATH_CHARS=60
     fi
@@ -1735,7 +1773,7 @@ for _T in "${TOPICS[@]}"; do
         fzf-action)     do_fzf_action "$1" "$2" ;;
         open-external)  do_open_external "$1" "$2" ;;
         jump-handler*)  do_jump_handler "$@" ;;
-        internal-query) _do_internal_query "$1" "$2" ;;
+        internal-query) _do_internal_query "$@" ;;
         internal-op)    _do_internal_op "$1" "$2" ;;
         *)              printf 'Unknown action: %s\n' "$ACTION"; exit 1 ;;
     esac

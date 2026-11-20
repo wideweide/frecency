@@ -13,6 +13,25 @@ _None._
 
 ## Backlog
 
+- [ ] Add a manual performance baseline script (not run in CI).
+  - Context: `jump-handler` and multi-destination writes were optimized on
+    2026-11-20 (in-process best match, one sqlite invocation per write), but
+    there is no repeatable way to detect performance creep.
+  - Acceptance: a disposable-`HOME` script seeds 110/1000/16000 rows and reports
+    add, typed jump, and full-list reload timings, with a comment explaining
+    that absolute numbers are host-dependent.
+  - Verification: run it on an idle host and record the output in `STATE.md`.
+
+- [ ] Revisit sqlite-mode per-keystroke reload latency for large tables.
+  - Context: each keystroke runs `internal-query` plus `SLEEP_DELAY` (60 ms);
+    the full-list reload grows linearly (about 35 ms at 1500 rows and 256 ms at
+    16000 on the 2026-11-20 tmpfs probe). The default `MAX_ENTRIES=1000` keeps
+    this bounded, but users can raise it.
+  - Acceptance: document the soft ceiling and `SEARCH_MODE=fzf` trade-off, or
+    reduce/skip the debounce for fast typists without regressing correctness.
+  - Verification: measure 1500/3000/5000 rows with a real terminal, then record
+    the decision in `STATE.md`.
+
 - [ ] Manual host integration checks for Bash, fish, vifm, and Neovim.
   - Context: `REGRESSION.md` lists host event behavior as not covered by
     automated end-to-end tests.

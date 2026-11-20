@@ -71,9 +71,10 @@ HOME="$test_home" scripts/frecency file add --route unified "$test_home/alpha"
    SELECT min(score), max(score) FROM entries WHERE keyword='';"
 ```
 
-Expected: the unbookmarked count is about 1351 (1350 target plus the protected
-new entry), `alpha` is present, and the retained scores are the higher ones.
-Bookmarks are exempt from both the limit and deletion.
+Expected: the unbookmarked count is about 951 (950 target with the default
+`MAX_ENTRIES=1000` and `PRUNE_FILL_PERCENT=95`, plus the protected new entry),
+`alpha` is present, and the retained scores are the higher ones. Bookmarks are
+exempt from both the limit and deletion.
 
 To check independent per-table limits, put them in `file.config` and repeat:
 
@@ -101,9 +102,42 @@ HOME="$test_home" scripts/frecency file add --route unified,dir,file "$test_home
 ```
 
 Expected: each non-empty table is at or below its configured limit after
-pruning (with the seeded rows above, the counts should be `91|181|271|1`:
+pruning (with the seeded rows above, the counts should be `96|191|286|1`:
 entries, directories, files, and the surviving bookmark), and the newly written
 entry survives. `MAX_ENTRIES=0` disables automatic pruning for that table.
+`PRUNE_FILL_PERCENT` (50-100, default 95) controls the trim target.
+
+## Cleanup guard and hysteresis
+
+A cleanup pass must not shorten a table that is still within capacity. With
+`MAX_ENTRIES=10` and ten rows, `cleanup` leaves all ten rows untouched; with
+eleven rows it trims to the 95% fill (nine rows). The same guard applies to the
+1-in-200 background pass.
+
+```bash
+test_home=$(mktemp -d)
+mkdir -p "$test_home/.local/share/frecency"
+printf '%s\n' 'IGNORE_PATTERNS=()' 'MAX_ENTRIES=10' \
+  > "$test_home/.local/share/frecency/file.config"
+HOME="$test_home" scripts/frecency file init
+sqlite_bin=$(cat "$test_home/.local/share/frecency/.sqlite3.bin")
+"$sqlite_bin" "$test_home/.local/share/frecency/file.db" <<'SQL'
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 10)
+INSERT INTO entries (content, keyword, score, visits, tick, last_access)
+SELECT '/guard/' || i, '', 1.0, 1, i, CURRENT_TIMESTAMP FROM n;
+UPDATE meta SET v = '10' WHERE k = 'tick';
+SQL
+HOME="$test_home" scripts/frecency file cleanup
+# still 10 rows
+"$sqlite_bin" "$test_home/.local/share/frecency/file.db" \
+  "INSERT INTO entries VALUES ('/guard/extra', '', 1.0, 1, 11, CURRENT_TIMESTAMP);
+   UPDATE meta SET v = '11' WHERE k = 'tick';"
+HOME="$test_home" scripts/frecency file cleanup
+# now 9 rows (95% of 10)
+```
+
+Set `PRUNE_FILL_PERCENT=50` in the same config to verify the trim target changes
+to five rows; values outside 50-100 fall back to 95.
 
 ## No score-threshold cleanup
 
@@ -134,7 +168,7 @@ HOME="$test_home" scripts/frecency file cleanup
 
 Expected: all three rows survive. `/dying/` has a current score of effectively
 zero after one million ticks, yet nothing may delete it while the table is far
-below its `MAX_ENTRIES` limit. `grep -rn "MIN_SCORE\|_prune_low_score"
+below its `MAX_ENTRIES` limit. `grep -rEn "MIN_SCORE|_prune_low_score|score floor|score-floor|manual score"
 scripts/ README.md` must return nothing.
 
 ## UI curation and missing paths

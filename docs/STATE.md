@@ -1,6 +1,6 @@
 # Project state
 
-Last updated: 2026-11-18
+Last updated: 2026-11-20
 Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
@@ -8,7 +8,18 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 - Branch: `main`. Use `git status -sb` and `git log --oneline -5` for the
   authoritative commit and working-tree state; no commit hash is recorded here.
 - Active task: none.
-- Last code change: added `tests/run-tests.sh` (20 CLI regression cases:
+- Last code change: applied P0/P1 from the jghub cleanup/performance feedback.
+  `do_cleanup()` now counts first and trims only when the non-bookmarked count
+  exceeds `MAX_ENTRIES` (a pass at the limit is a no-op). The trim target is
+  public as `PRUNE_FILL_PERCENT` (50-100, default 95; `_PRUNE_FILL_PERCENT`
+  remains a legacy alias) and is read from `file.config` for the shared
+  file.db tables. `MAX_ENTRIES` now defaults to 1000. Performance:
+  `jump-handler` calls `_do_internal_query` in-process with an optional SQL
+  `LIMIT` (best match uses 1), and a write collects every destination's
+  post-write count in the same sqlite3 invocation as the upsert. Stale
+  score-floor comments were removed. README, REGRESSION, and the CLI suite were
+  updated; 27 cases pass.
+- Previous code change: added `tests/run-tests.sh` (20 CLI regression cases:
   capacity math incl. leading-zero/`0`/fill-level, write-protocol rejection,
   no-score-threshold invariant, config validation, shared per-table limits,
   undo trim, unbook, remove+undo, recent validation, jump-handler, missing-path
@@ -17,22 +28,15 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
   warning (~29: SC2155 splits, SC2209 quoting, dead SC2034 vars, SC2164 cd
   guards); two intentional patterns carry disable directives (SC2053 config
   glob, SC1090 config source).
-- Previous code change: NORMAL-mode keys are now `y` (copy, Vim yank habit) and
+- Earlier change: NORMAL-mode keys are now `y` (copy, Vim yank habit) and
   `g` (open the selected entry's git repository in the first available
   `gitui`/`ziggity`/`lazygit` in a new tmux window, then exit fzf). `g:first`
   and `G:last` were removed, along with `h`/`l` (single-column list); only
   `j`/`k` move. The helper lives in `scripts/open_git_repo.sh` and is installed
   with the other scripts. Entries outside a git repository leave the picker
   open.
-- Earlier change: pre-commit review of the pending audit-remediation + H6/H7
-  changeset found and fixed two bugs: (1) `_dec()` used `printf '%d' "10#N"`,
-  which strtol-parses only up to `#` and returns 10 with stderr noise — every
-  cleanup/auto-prune computed keep=1 and wiped tables with >10 entries to a
-  single row (empirically 50 rows -> 1); now uses `$(( 10#... ))` arithmetic.
-  (2) `do_jump_handler` still had 3 unquoted `$SELF` calls, so `j`/`ji`/`J`/`o`
-  broke (rc 127) under a space-containing install path; now `"$SELF"`.
-- Next action: none queued; see [`TASKS.md`](TASKS.md) for the remaining manual
-  host and interactive checks.
+- Next action: none queued; optional P2 follow-ups (a manual benchmark script
+  and the per-keystroke reload latency) are in [`TASKS.md`](TASKS.md).
 - Blockers: none. Real-data cleanup was explicitly requested and performed after
   a verified backup; see the 2026-11-18 real-data entry below.
 
@@ -43,6 +47,11 @@ change; record the actual commands and results here.
 
 | Area | Check | Result |
 |---|---|---|
+| P0 cleanup | `MAX_ENTRIES=10`: at 10 rows cleanup keeps 10, at 11 rows trims to 9; `PRUNE_FILL_PERCENT=50` keeps 5 + protected; `0`/`200` fall back to 95% | pass |
+| P0 config | `file.config` `PRUNE_FILL_PERCENT=50` applies to `file_dir`; legacy `_PRUNE_FILL_PERCENT=50` works; `MAX_ENTRIES=08` falls back to the 1000 default | pass |
+| P1 writes | one `--route unified,dir,file` write -> `6\|11\|16`; old vs new `unified,dir` add on a loaded host ~51-56 -> ~42-44 ms/op | pass |
+| P1 jump | in-process best match with SQL `LIMIT 1`; output matches exact/multi-word/no-match/empty; stub-fzf picker rc 0; loaded host ~72-89 -> ~42-47 ms/op (idle: 39 -> 28) | pass |
+| Tests | `bash -n` (6 scripts), `fish -n`, `tests/run-tests.sh` -> 27 passed, 0 failed | pass |
 | Syntax | `bash -n` on `scripts/frecency`, `scripts/frecency-test`, `scripts/bmark.sh`, `shell/frecency.bash`, `install.sh` | pass |
 | Syntax | `fish -n shell/frecency.fish` | pass |
 | Whitespace | `git diff --check` | pass |
@@ -112,6 +121,33 @@ change; record the actual commands and results here.
 
 ## Recent changes
 
+- 2026-11-20: applied P0/P1 from the jghub cleanup/performance feedback.
+  (1) `do_cleanup()` now counts the non-bookmarked rows first and trims only
+  when the count exceeds `MAX_ENTRIES`; previously a manual or 1-in-200
+  background pass trimmed to the fill level even below capacity (10 rows at
+  limit 10 became 9; 1400 at limit 1500 became 1350). The fill percentage is
+  hysteresis, not a second cap.
+  (2) The trim target is public as `PRUNE_FILL_PERCENT` (valid 50-100, default
+  95; outside the range falls back to 95). It is loaded from the topic config
+  and, for `file_dir`/`file_file`, from `file.config` through
+  `_load_shared_file_limits()`; `_PRUNE_FILL_PERCENT` remains a deprecated
+  alias. `PRUNE_FILL_PERCENT=0` can no longer collapse a table to two rows.
+  (3) `MAX_ENTRIES` defaults to 1000 instead of 1500, keeping the sqlite-mode
+  full-list reload short; README explains the trade-off and points at
+  `SEARCH_MODE=fzf` for very large tables.
+  (4) `do_jump_handler` calls `_do_internal_query` directly instead of
+  re-executing the script, and passes `LIMIT 1` for the no-fzf best-match path;
+  measured 39 -> 28 ms/op on an idle host and ~72-89 -> ~42-47 ms/op on a
+  loaded one.
+  (5) `_do_upsert_route` now requests each destination's post-write `COUNT(*)`
+  inside the same sqlite3 invocation as the upsert (the counts sit before
+  `COMMIT`), removing one process per table; `add --route unified,dir` measured
+  ~51-56 -> ~42-44 ms/op on the same loaded host.
+  (6) Removed the three stale score-floor comments and extended the
+  `docs/REGRESSION.md` grep invariant to catch them. Tests grew from 20 to 27
+  CLI cases (cleanup guard, public/legacy fill settings, shared fill, and
+  per-destination counts); all pass. No real-data migration is needed: the
+  current topic tables are well below the new 1000 default.
 - 2026-11-19: repaired the legacy `dir.db` index corruption: `PRAGMA
   integrity_check` reported `row 6 missing from index
   sqlite_autoindex_entries_1` (pre-existing, first noted during the 2026-11-18

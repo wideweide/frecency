@@ -139,11 +139,44 @@ case_begin "add honors built-in ignore patterns"
 assert_eq "tmp path skipped" "0" "$(count_rows "$DB" entries)"
 ok
 
-case_begin "cleanup is a no-op while under the capacity limit"
-init_topic file
+case_begin "cleanup is a no-op at or below the capacity limit"
+init_topic file "MAX_ENTRIES=10"
+seed_rows "$DB" entries tick 10
+assert_rc "cleanup at the limit" 0 "$FRECENCY" file cleanup
+assert_eq "all rows kept at the limit" "10" "$(count_rows "$DB" entries)"
+printf 'IGNORE_PATTERNS=()\nMAX_ENTRIES=100\n' > "$DATA/file.config"
+sqlite3 "$DB" "DELETE FROM entries;"
 seed_rows "$DB" entries tick 50
-assert_rc "cleanup" 0 "$FRECENCY" file cleanup
-assert_eq "all rows kept" "50" "$(count_rows "$DB" entries)"
+assert_rc "cleanup below the limit" 0 "$FRECENCY" file cleanup
+assert_eq "all rows kept below the limit" "50" "$(count_rows "$DB" entries)"
+ok
+
+case_begin "cleanup prunes only when the table exceeds the capacity limit"
+init_topic file "MAX_ENTRIES=10"
+seed_rows "$DB" entries tick 11
+assert_rc "cleanup above the limit" 0 "$FRECENCY" file cleanup
+assert_eq "trimmed to the 95% fill" "9" "$(count_rows "$DB" entries)"
+ok
+
+case_begin "PRUNE_FILL_PERCENT controls the trim target"
+init_topic file "MAX_ENTRIES=10" "PRUNE_FILL_PERCENT=50"
+seed_rows "$DB" entries tick 50
+assert_rc "add with a 50% fill" 0 "$FRECENCY" file add "$HOME/newdir"
+assert_eq "5 kept + protected new" "6" "$(count_rows "$DB" entries)"
+ok
+
+case_begin "out-of-range PRUNE_FILL_PERCENT falls back to 95"
+init_topic file "MAX_ENTRIES=10" "PRUNE_FILL_PERCENT=0"
+seed_rows "$DB" entries tick 50
+assert_rc "add with an invalid fill" 0 "$FRECENCY" file add "$HOME/newdir"
+assert_eq "95% fill: 9 kept + protected new" "10" "$(count_rows "$DB" entries)"
+ok
+
+case_begin "legacy _PRUNE_FILL_PERCENT is still accepted"
+init_topic file "MAX_ENTRIES=10" "_PRUNE_FILL_PERCENT=50"
+seed_rows "$DB" entries tick 50
+assert_rc "add with the legacy alias" 0 "$FRECENCY" file add "$HOME/newdir"
+assert_eq "5 kept + protected new" "6" "$(count_rows "$DB" entries)"
 ok
 
 case_begin "capacity prune keeps the fill level and protects the new entry"
@@ -169,7 +202,7 @@ init_topic file "MAX_ENTRIES=08"
 seed_rows "$DB" entries tick 12
 assert_rc "add" 0 "$FRECENCY" file add "$HOME/kept"
 assert_quiet_stderr "no printf/arithmetic noise" "$FRECENCY" file cleanup
-assert_eq "fell back to the 1500 default" "13" "$(count_rows "$DB" entries)"
+assert_eq "fell back to the 1000 default" "13" "$(count_rows "$DB" entries)"
 ok
 
 case_begin "no score-threshold cleanup: near-zero rows survive"
@@ -182,7 +215,7 @@ ok
 
 case_begin "invalid numeric config falls back to defaults"
 init_topic file "LAMBDA=abc" "SLEEP_DELAY=bad" "UNDO_KEEP=x" "LAST_LIMIT=bad" \
-    "MAX_PATH_CHARS=bad" "_PRUNE_FILL_PERCENT=200"
+    "MAX_PATH_CHARS=bad" "PRUNE_FILL_PERCENT=200"
 assert_rc "add with garbage config" 0 "$FRECENCY" file add "$HOME/x"
 assert_rc "internal-query with garbage config" 0 "$FRECENCY" file internal-query all
 assert_rc "start_data=last path with garbage config" 0 "$FRECENCY" file internal-query all last
@@ -195,6 +228,27 @@ printf 'MAX_ENTRIES_DIR=10\n' > "$DATA/file.config"
 seed_rows "$DB" dir_entries dir_tick 50
 assert_rc "file_dir add" 0 "$FRECENCY" file_dir add "$HOME/newdir"
 assert_eq "pruned to 9 + protected new" "10" "$(count_rows "$DB" dir_entries)"
+ok
+
+case_begin "split topics share PRUNE_FILL_PERCENT from file.config"
+"$FRECENCY" file_dir init >/dev/null 2>&1
+printf 'IGNORE_PATTERNS=()\n' > "$DATA/file_dir.config"
+printf 'MAX_ENTRIES_DIR=10\nPRUNE_FILL_PERCENT=50\n' > "$DATA/file.config"
+seed_rows "$DB" dir_entries dir_tick 50
+assert_rc "file_dir add" 0 "$FRECENCY" file_dir add "$HOME/newdir"
+assert_eq "shared 50% fill: 5 + protected new" "6" "$(count_rows "$DB" dir_entries)"
+ok
+
+case_begin "one write counts every destination for capacity"
+init_topic file
+printf 'IGNORE_PATTERNS=()\nMAX_ENTRIES_UNIFIED=10\nMAX_ENTRIES_DIR=20\nMAX_ENTRIES_FILE=30\nPRUNE_FILL_PERCENT=50\n' > "$DATA/file.config"
+seed_rows "$DB" entries tick 50
+seed_rows "$DB" dir_entries dir_tick 50
+seed_rows "$DB" file_entries file_tick 50
+assert_rc "three-destination add" 0 "$FRECENCY" file add --route unified,dir,file "$HOME/newboth"
+assert_eq "unified 5 + protected" "6" "$(count_rows "$DB" entries)"
+assert_eq "dir 10 + protected" "11" "$(count_rows "$DB" dir_entries)"
+assert_eq "file 15 + protected" "16" "$(count_rows "$DB" file_entries)"
 ok
 
 case_begin "the undo table is trimmed to UNDO_KEEP"

@@ -368,10 +368,11 @@ GRADE_MODE=on             # rank by match quality (keyword/last-segment grades)
 MULTIWORD_MODE=ordered    # ordered (foo bar matches foo*bar) or any-order
 LAMBDA=0.01               # decay per navigation event; the unified `file`
                           # history defaults to 0.005
-MAX_ENTRIES=1500          # fallback capacity for each history table
+MAX_ENTRIES=1000          # fallback capacity for each history table
 MAX_ENTRIES_UNIFIED=      # per-table override for the `entries` table
 MAX_ENTRIES_DIR=          # per-table override for `dir_entries`
 MAX_ENTRIES_FILE=         # per-table override for `file_entries`
+PRUNE_FILL_PERCENT=95     # trim target after overflow (50-100; default 95)
 MAX_PATH_CHARS=60         # weighted display width before list paths abbreviate
 START_MODE=search         # 'search' starts with prompt ready, 'normal' with Vim keys
 START_DATA=all            # 'all' loads everything, 'last' only the LAST_LIMIT recent entries
@@ -390,18 +391,26 @@ destination that topic writes.
 
 Maintenance is capacity-based only, run after every write and by
 `frecency <topic> cleanup`: when a table exceeds its `MAX_ENTRIES` limit it is
-trimmed by removing the lowest-scoring entries down to 90% of the limit. There
-is deliberately **no score threshold**: a score is an ordinal used for ranking
-and for choosing which rows a capacity trim removes, never a retention test —
-a tiny score only means "rarely visited", not "dead", and such entries stay
-reachable through specific queries and the picker. Bookmarked entries are never
-counted or removed, and on writes the entry just written is protected. The
-three tables share `file.db`, so put the per-table limits in
-`~/.local/share/frecency/file.config`; empty limits fall back to `MAX_ENTRIES`.
-Set a limit to `0` to disable pruning for that table. `LAMBDA` stays static per
-table; tune `MAX_ENTRIES`, not `LAMBDA`, if you want less or more retention. A
-low-probability background pass (about 1 in 200 writes) runs the same `cleanup`
-as a safety net for concurrent writers.
+trimmed by removing the lowest-scoring entries down to `PRUNE_FILL_PERCENT` of
+the limit (95% by default). Values outside 50-100 fall back to 95. A cleanup
+pass never shortens a table that is at or below its limit; the fill percentage
+is hysteresis, not a second cap. There is deliberately **no score threshold**: a
+score is an ordinal used for ranking and for choosing which rows a capacity trim
+removes, never a retention test — a tiny score only means "rarely visited", not
+"dead", and such entries stay reachable through specific queries and the picker.
+Bookmarked entries are never counted or removed, and on writes the entry just
+written is protected, so the count after a trim is the fill level plus that
+entry. The three tables share `file.db`, so put the per-table limits and the
+fill percentage in `~/.local/share/frecency/file.config`; empty limits fall back
+to `MAX_ENTRIES`. Set a limit to `0` to disable pruning for that table. `LAMBDA`
+stays static per table; tune `MAX_ENTRIES`, not `LAMBDA`, if you want less or
+more retention. The 1000 default keeps the sqlite-mode full-list reload fast;
+raise it for a longer history, and consider `SEARCH_MODE=fzf` for very large
+tables. If an existing table already holds more than 1000 rows and has no
+explicit limit, the next write or cleanup trims it to the new fill level; set
+`MAX_ENTRIES` explicitly to keep a larger history. A low-probability background
+pass (about 1 in 200 writes) runs the same `cleanup` as a safety net for
+concurrent writers.
 
 Legacy entries remain in unified `entries` after upgrade. Split histories start
 accumulating when those directories and files are next visited or opened; the
@@ -482,7 +491,7 @@ frecency <topic> jump-handler [--picker] [--emit=path] [term]
 frecency <topic> jump-handler-vifm [term]   # same, vifm flavour (goto)
 frecency <topic> remove <content>           # delete (undoable in the UI)
 frecency <topic> recent <seconds> [content] # exit 0 if content (or anything) changed recently
-frecency <topic> cleanup                    # capacity prune (90% of MAX_ENTRIES)
+frecency <topic> cleanup                    # capacity prune (95% of MAX_ENTRIES)
 ```
 
 For the shared `file.db`, logical topics `file`, `file_dir`, and `file_file`
