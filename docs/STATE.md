@@ -8,7 +8,16 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 - Branch: `main`. Use `git status -sb` and `git log --oneline -5` for the
   authoritative commit and working-tree state; no commit hash is recorded here.
 - Active task: none.
-- Last code change: applied P0/P1 from the jghub cleanup/performance feedback.
+- Last code change: P2 follow-ups. Added `scripts/bench.sh`, a manual
+  disposable-`HOME` baseline (not installed, not in CI) that seeds
+  110/1000/16000 rows and reports `add`, typed `jump-handler` and full-list
+  reload timings. Reduced `SLEEP_DELAY` from 0.06 to 0.02 after a pty test
+  confirmed fzf cancels superseded reloads; real-fzf measurements at
+  1500/3000/5000 rows showed per-keystroke latency dropping from
+  ~213/265/315 ms to ~130-168/168/214 ms. README now documents the
+  sqlite-mode soft ceiling, the `SEARCH_MODE=fzf` trade-off, and the bench
+  script.
+- Previous code change: P0/P1 from the jghub cleanup/performance feedback.
   `do_cleanup()` now counts first and trims only when the non-bookmarked count
   exceeds `MAX_ENTRIES` (a pass at the limit is a no-op). The trim target is
   public as `PRUNE_FILL_PERCENT` (50-100, default 95; `_PRUNE_FILL_PERCENT`
@@ -19,7 +28,7 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
   post-write count in the same sqlite3 invocation as the upsert. Stale
   score-floor comments were removed. README, REGRESSION, and the CLI suite were
   updated; 27 cases pass.
-- Previous code change: added `tests/run-tests.sh` (20 CLI regression cases:
+- Earlier change: added `tests/run-tests.sh` (20 CLI regression cases:
   capacity math incl. leading-zero/`0`/fill-level, write-protocol rejection,
   no-score-threshold invariant, config validation, shared per-table limits,
   undo trim, unbook, remove+undo, recent validation, jump-handler, missing-path
@@ -35,8 +44,8 @@ Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
   `j`/`k` move. The helper lives in `scripts/open_git_repo.sh` and is installed
   with the other scripts. Entries outside a git repository leave the picker
   open.
-- Next action: none queued; optional P2 follow-ups (a manual benchmark script
-  and the per-keystroke reload latency) are in [`TASKS.md`](TASKS.md).
+- Next action: none queued. The remaining backlog is the manual host
+  integration and interactive picker checks in [`TASKS.md`](TASKS.md).
 - Blockers: none. Real-data cleanup was explicitly requested and performed after
   a verified backup; see the 2026-11-18 real-data entry below.
 
@@ -51,7 +60,9 @@ change; record the actual commands and results here.
 | P0 config | `file.config` `PRUNE_FILL_PERCENT=50` applies to `file_dir`; legacy `_PRUNE_FILL_PERCENT=50` works; `MAX_ENTRIES=08` falls back to the 1000 default | pass |
 | P1 writes | one `--route unified,dir,file` write -> `6\|11\|16`; old vs new `unified,dir` add on a loaded host ~51-56 -> ~42-44 ms/op | pass |
 | P1 jump | in-process best match with SQL `LIMIT 1`; output matches exact/multi-word/no-match/empty; stub-fzf picker rc 0; loaded host ~72-89 -> ~42-47 ms/op (idle: 39 -> 28) | pass |
-| Tests | `bash -n` (6 scripts), `fish -n`, `tests/run-tests.sh` -> 27 passed, 0 failed | pass |
+| P2 bench | `BENCH_ROOT=/dev/shm scripts/bench.sh`: 110/1000/16000 rows -> add ~24-25 ms/op, typed jump ~26-28 ms/op, full reload ~17/25/174 ms/op | pass |
+| P2 latency | real fzf in a pty at 1500/3000/5000 rows: `SLEEP_DELAY=0.06` ~213/265/315 ms -> `0.02` ~130-168/168/214 ms; a pty probe confirmed fzf cancels superseded reloads | pass |
+| Tests | `bash -n` (7 scripts incl. `scripts/bench.sh`), `fish -n`, `tests/run-tests.sh` -> 27 passed, 0 failed | pass |
 | Syntax | `bash -n` on `scripts/frecency`, `scripts/frecency-test`, `scripts/bmark.sh`, `shell/frecency.bash`, `install.sh` | pass |
 | Syntax | `fish -n shell/frecency.fish` | pass |
 | Whitespace | `git diff --check` | pass |
@@ -121,6 +132,18 @@ change; record the actual commands and results here.
 
 ## Recent changes
 
+- 2026-11-20 (P2): finished the two deferred performance follow-ups. Added
+  `scripts/bench.sh` (manual, not installed and not in CI) with a disposable
+  `HOME`, seeded 110/1000/16000 rows and timings for `add`, typed
+  `jump-handler` and `internal-query all`; default run on tmpfs: add ~24-25
+  ms/op, jump ~26-28 ms/op, full reload ~17/25/174 ms/op. Verified with a pty
+  that fzf cancels superseded `reload` processes, then lowered `SLEEP_DELAY`
+  from 0.06 to 0.02 s (and its invalid-config fallback); a real-fzf pty probe
+  at 1500/3000/5000 rows measured ~213/265/315 ms -> ~130-168/168/214 ms per
+  keystroke. README documents the sqlite-mode soft ceiling, the
+  `SEARCH_MODE=fzf` trade-off and how to run the bench script. CI and the
+  local shellcheck list now cover `scripts/bench.sh` too. P2 items were removed
+  from `TASKS.md`; no regression tests changed (27 still pass).
 - 2026-11-20: applied P0/P1 from the jghub cleanup/performance feedback.
   (1) `do_cleanup()` now counts the non-bookmarked rows first and trims only
   when the count exceeds `MAX_ENTRIES`; previously a manual or 1-in-200

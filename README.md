@@ -377,7 +377,7 @@ MAX_PATH_CHARS=60         # weighted display width before list paths abbreviate
 START_MODE=search         # 'search' starts with prompt ready, 'normal' with Vim keys
 START_DATA=all            # 'all' loads everything, 'last' only the LAST_LIMIT recent entries
 LAST_LIMIT=15             # how many entries START_DATA=last loads
-SLEEP_DELAY=0.06          # reload debounce (seconds) for sqlite search mode
+SLEEP_DELAY=0.02          # reload debounce (seconds) for sqlite search mode
 UNDO_KEEP=200             # how many deleted entries are kept for undo
 RECORD_UNIFIED=1          # also write to the unified `entries` history
 RECORD_SPLIT=1            # also write to the matching typed history
@@ -404,9 +404,13 @@ entry. The three tables share `file.db`, so put the per-table limits and the
 fill percentage in `~/.local/share/frecency/file.config`; empty limits fall back
 to `MAX_ENTRIES`. Set a limit to `0` to disable pruning for that table. `LAMBDA`
 stays static per table; tune `MAX_ENTRIES`, not `LAMBDA`, if you want less or
-more retention. The 1000 default keeps the sqlite-mode full-list reload fast;
-raise it for a longer history, and consider `SEARCH_MODE=fzf` for very large
-tables. If an existing table already holds more than 1000 rows and has no
+more retention. In `SEARCH_MODE=sqlite` every keystroke triggers a fresh
+full-list query, so reload cost grows roughly linearly with the table size;
+`SLEEP_DELAY` (default 0.02 s) is only a short debounce — fzf cancels superseded
+reloads — and does not make a very large table cheap. The 1000 default keeps
+this bounded; if you raise it beyond a few thousand rows, prefer
+`SEARCH_MODE=fzf`, which loads once and filters locally but loses query-aware
+grading. If an existing table already holds more than 1000 rows and has no
 explicit limit, the next write or cleanup trims it to the new fill level; set
 `MAX_ENTRIES` explicitly to keep a larger history. A low-probability background
 pass (about 1 in 200 writes) runs the same `cleanup` as a safety net for
@@ -476,6 +480,20 @@ restores the latest deleted entry.
 
 Maintainers can use the [regression checklist](docs/REGRESSION.md) before
 releasing changes.
+
+## Performance baseline
+
+`scripts/bench.sh` is a manual benchmark for the write, typed-jump and
+full-list-reload paths. It is not installed and is not part of CI:
+
+```bash
+BENCH_ROOT=/dev/shm scripts/bench.sh     # tmpfs avoids slow fsync on some hosts
+scripts/bench.sh 1500 3000 5000          # custom row counts
+```
+
+It seeds a disposable database and reports ms/op per action. Absolute numbers
+depend on the host (shell startup, filesystem, load, warm caches); compare
+before/after runs on the same machine instead of treating them as targets.
 
 ## CLI
 

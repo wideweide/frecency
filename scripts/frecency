@@ -106,7 +106,7 @@ MAX_ENTRIES_DIR=
 MAX_ENTRIES_FILE=
 PRUNE_FILL_PERCENT=     # trim target as a percentage of the limit; empty means 95
 _PRUNE_FILL_PERCENT=    # deprecated alias for PRUNE_FILL_PERCENT
-SLEEP_DELAY=0.06    # reload debounce for sqlite mode; a query takes ~25ms, so 0.2 is pure lag
+SLEEP_DELAY=0.02    # reload debounce for sqlite mode; fzf cancels superseded reloads
 START_DATA=all      # 'last' recent entries / 'all' everything
 START_MODE=search   # 'normal' (Vim keys) / 'search' (type directly)
 LAST_LIMIT=15
@@ -1428,6 +1428,9 @@ GITABORT
     [[ "$START_DATA" == "last" ]] && SEARCH_BIND="$SEARCH_BIND+transform:test -z '{q}' && echo 'reload($_QSELF \"$TOPIC\" internal-query all)' || echo 'nop'"
 
     local CHANGE_BIND="first"
+    # fzf cancels the previous reload when a new one starts, so a short debounce
+    # keeps fast typing from piling up queries without adding a fixed 60 ms tax
+    # to every keystroke.
     [[ "$SEARCH_MODE" == "sqlite" ]] && CHANGE_BIND="reload(sleep $SLEEP_DELAY; $_QSELF \"$TOPIC\" internal-query all {q} || true)+$CHANGE_BIND"
     CHANGE_BIND+="+$FOOTER_ACTION"
 
@@ -1736,7 +1739,7 @@ for _T in "${TOPICS[@]}"; do
         # Validate numeric config before it reaches SQL or shell command strings.
         # PRUNE_FILL_PERCENT is normalized by _prune_fill_percent() at use time.
         _is_num "$LAMBDA" || LAMBDA=$_lambda_default
-        _is_num "$SLEEP_DELAY" || SLEEP_DELAY=0.06
+        _is_num "$SLEEP_DELAY" || SLEEP_DELAY=0.02
         _is_uint "$UNDO_KEEP" || UNDO_KEEP=200
         _is_uint "$LAST_LIMIT" || LAST_LIMIT=15
         _is_uint "$MAX_PATH_CHARS" || MAX_PATH_CHARS=60

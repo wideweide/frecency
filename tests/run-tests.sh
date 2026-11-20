@@ -331,7 +331,8 @@ case_begin "shellcheck (when available)"
 if command -v "$SHELLCHECK_BIN" >/dev/null 2>&1; then
     assert_rc "shellcheck -S warning" 0 "$SHELLCHECK_BIN" -S warning \
         "$ROOT/scripts/frecency" "$ROOT/scripts/frecency-test" "$ROOT/scripts/bmark.sh" \
-        "$ROOT/scripts/open_git_repo.sh" "$ROOT/install.sh" "$ROOT/shell/frecency.bash"
+        "$ROOT/scripts/open_git_repo.sh" "$ROOT/scripts/bench.sh" "$ROOT/install.sh" \
+        "$ROOT/shell/frecency.bash"
 else
     printf '  - %s: shellcheck not installed, skipping\n' "$CURRENT_NAME"
 fi
