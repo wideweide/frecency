@@ -87,6 +87,16 @@ picker remains the unified view and previews files and directories. Selecting
 an entry does not add a visit; directories and files are recorded when
 explicitly navigated to or opened.
 
+The intended workflow is the one z, autojump, zoxide and ze.sh are all built
+around: type a fragment, take the best match, refine when wrong. In the shell,
+`j <term>` jumps straight to the top-scoring entry; if that is not the one you
+meant, add keywords (ordered / any-order multi-word matching) or search the
+bookmark tag instead of scrolling. In the picker, the first screen shows the
+top of the score-ordered list — bookmarks and high-score entries stay on top —
+and the `1/n` info line always says how many entries matched in total. The
+32-row query cap (`QUERY_LIMIT`, default 32) keeps every keystroke fast in
+sqlite mode; set `QUERY_LIMIT=0` if you prefer the unlimited list.
+
 ### Integration behavior
 
 All integrations can record to the unified history and to the matching

@@ -69,6 +69,7 @@ change; record the actual commands and results here.
 | jghub cross-check | Replicated the fzf#4789 CLI probes on this host (disposable HOME, 110 rows via 990 real adds): unlimited `internal-query all dir` ~43.7 ms/op, capped 32+TOTAL ~26.7 ms/op, `jump-handler --emit=path` ~29-31 ms/op (validation-exit path; one `stat` short of the success path), `add` ~187-266 ms/op on /tmp HDD; fixed-overhead split: `bash -c :` 1.8 ms, `bash -n` 4.7 ms (net parse ~3 ms), in-process source loop (jghub's method) 12.3 ms/op (HDD scratch) / 13.7 ms/op (tmpfs scratch), sqlite3 spawn+open 4.0 ms; sqlite commit microbench 85 ms (HDD) vs 6.3 ms (tmpfs) | pass |
 | jghub cross-check | `scripts/bench.sh 110` same-day A/B: /dev/shm add ~39, jump ~42, reload ~30, unlimited ~42, limit32 ~26; /tmp HDD add ~187-189, jump ~29, reload ~25, unlimited ~37.5, limit32 ~26-30 — reads are disk-insensitive with warm caches, writes ~4.8x slower on the HDD; today's tmpfs add ~39 vs the recorded ~24-25 and reload ~30 vs ~17 show roughly +/-60% day-to-day/load variance | pass |
 | bench portability | `scripts/bench.sh` `now_ns()` switched from `date +%s%N` (GNU-only; macOS/BSD `date` lacks `%N`, so the script could not run there) to string-concatenated `EPOCHREALTIME` with a GNU-date fallback; 50 ms sleep probe returns ~53 ms; `bench.sh 110` rerun on /dev/shm: add 74.4/27.6, jump 28.1, reload 19.9, unlimited 27.9, limit32 27.9/28.0 | pass |
+| Usage model docs | README "Typical use" recommendation checked against the implementation (`QUERY_LIMIT` 32/0 semantics, best-match `j` with rc≠0 on no-match, ordered/any-order multi-word, `1/n` info line); interaction-model survey of z, autojump, zoxide and ze — all four jump to the single best match non-interactively and show the ranked list only in interactive modes | pass |
 | P0 cleanup | `MAX_ENTRIES=10`: at 10 rows cleanup keeps 10, at 11 rows trims to 9; `PRUNE_FILL_PERCENT=50` keeps 5 + protected; `0`/`200` fall back to 95% | pass |
 | P0 config | `file.config` `PRUNE_FILL_PERCENT=50` applies to `file_dir`; legacy `_PRUNE_FILL_PERCENT=50` works; `MAX_ENTRIES=08` falls back to the 1000 default | pass |
 | P1 writes | one `--route unified,dir,file` write -> `6\|11\|16`; old vs new `unified,dir` add on a loaded host ~51-56 -> ~42-44 ms/op | pass |
@@ -147,6 +148,15 @@ change; record the actual commands and results here.
 
 ## Recent changes
 
+- 2026-11-21 (usage-model recommendation, docs-only): README "Typical use" now
+  states the recommended interaction model: `j <term>` jumps to the best
+  match; a wrong guess is refined with more keywords or the bookmark tag
+  instead of scrolling; the picker shows the top of the score-ordered list
+  with the `1/n` counter; `QUERY_LIMIT=0` restores the unlimited list. Backed
+  by a survey of z, autojump, zoxide and ze: all four jump to the single best
+  match non-interactively and show the ranked list only in their interactive
+  modes; ze (jghub's own tool) documents "the highest-scoring match is the
+  statistically most likely intended destination". No code change.
 - 2026-11-21 (bench portability): `scripts/bench.sh` could not run on macOS:
   `date +%N` is a GNU extension and BSD date emits a literal `N`, which breaks
   the `set -u` arithmetic at the first bench call. `now_ns()` now prefers
