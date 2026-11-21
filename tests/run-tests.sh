@@ -197,6 +197,22 @@ assert_rc "add with pruning disabled" 0 "$FRECENCY" file add "$HOME/kept"
 assert_eq "all rows kept" "13" "$(count_rows "$DB" entries)"
 ok
 
+case_begin "unified pool defaults to twice the split-table capacity"
+init_topic file
+seed_rows "$DB" entries tick 2001
+assert_rc "unified cleanup above the 2000 default" 0 "$FRECENCY" file cleanup
+assert_eq "unified trimmed to the 95% fill" "1900" "$(count_rows "$DB" entries)"
+init_topic file_dir
+seed_rows "$DB" dir_entries dir_tick 1001
+assert_rc "dir cleanup above the 1000 default" 0 "$FRECENCY" file_dir cleanup
+assert_eq "split dir table keeps the 1000 default" "950" "$(count_rows "$DB" dir_entries)"
+printf 'MAX_ENTRIES=500\n' > "$DATA/file.config"
+sqlite3 "$DB" "DELETE FROM entries; DELETE FROM dir_entries;"
+seed_rows "$DB" entries tick 501
+assert_rc "cleanup with explicit MAX_ENTRIES" 0 "$FRECENCY" file cleanup
+assert_eq "explicit MAX_ENTRIES pins the unified pool" "475" "$(count_rows "$DB" entries)"
+ok
+
 case_begin "leading-zero MAX_ENTRIES falls back without an octal error"
 init_topic file "MAX_ENTRIES=08"
 seed_rows "$DB" entries tick 12

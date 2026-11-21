@@ -21,7 +21,7 @@ ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 FRECENCY="$ROOT_DIR/scripts/frecency"
 ROWS_LIST=("$@")
 if (( $# == 0 )); then
-    ROWS_LIST=(110 1000 16000)
+    ROWS_LIST=(110 1000 2000 16000)
 fi
 
 SCRATCH=$(mktemp -d "${BENCH_ROOT:-/tmp}/frecency-bench.XXXXXX") || exit 1

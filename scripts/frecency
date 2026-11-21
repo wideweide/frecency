@@ -100,7 +100,7 @@ case "$(uname -m)" in
 esac
 
 # --- Default configuration (overridable by <topic>.config) ---
-MAX_ENTRIES=            # fallback capacity; empty means 1000
+MAX_ENTRIES=            # fallback capacity; empty means 1000 (unified pool: 2000)
 MAX_ENTRIES_UNIFIED=    # per-table override; empty falls back to MAX_ENTRIES
 MAX_ENTRIES_DIR=
 MAX_ENTRIES_FILE=
@@ -394,13 +394,18 @@ _prune_fill_percent() {
 }
 
 # Capacity limit for a history destination. Empty per-table values fall back to
-# MAX_ENTRIES; 0 disables automatic pruning for that table.
+# MAX_ENTRIES; 0 disables automatic pruning for that table. The unified pool
+# holds directories and files together and its event clock ticks about twice
+# as fast, so with no explicit MAX_ENTRIES it defaults to twice the capacity
+# of the split dir/file tables.
 _limit_for_dest() {
     _load_shared_file_limits
     local base="${MAX_ENTRIES:-1000}"
     _is_uint "$base" || base=1000
+    local uni_base=$base
+    [[ -n "${MAX_ENTRIES:-}" ]] || uni_base=2000
     case "$1" in
-        unified) printf '%s' "${MAX_ENTRIES_UNIFIED:-$base}" ;;
+        unified) printf '%s' "${MAX_ENTRIES_UNIFIED:-$uni_base}" ;;
         dir)     printf '%s' "${MAX_ENTRIES_DIR:-$base}" ;;
         file)    printf '%s' "${MAX_ENTRIES_FILE:-$base}" ;;
     esac

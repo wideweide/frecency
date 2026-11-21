@@ -58,11 +58,11 @@ printf '%s\n' 'IGNORE_PATTERNS=()' > "$test_home/.local/share/frecency/file.conf
 HOME="$test_home" scripts/frecency file init
 sqlite_bin=$(cat "$test_home/.local/share/frecency/.sqlite3.bin")
 "$sqlite_bin" "$test_home/.local/share/frecency/file.db" <<'SQL'
-WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 1600)
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 2200)
 INSERT INTO entries (content, keyword, score, visits, tick, last_access)
 SELECT '/seed/' || i, '', i, 1, i,
        datetime('now', '-' || (2000 - i) || ' seconds') FROM n;
-UPDATE meta SET v = '1600' WHERE k = 'tick';
+UPDATE meta SET v = '2200' WHERE k = 'tick';
 SQL
 HOME="$test_home" scripts/frecency file add --route unified "$test_home/alpha"
 "$sqlite_bin" "$test_home/.local/share/frecency/file.db" \
@@ -71,8 +71,8 @@ HOME="$test_home" scripts/frecency file add --route unified "$test_home/alpha"
    SELECT min(score), max(score) FROM entries WHERE keyword='';"
 ```
 
-Expected: the unbookmarked count is about 951 (950 target with the default
-`MAX_ENTRIES=1000` and `PRUNE_FILL_PERCENT=95`, plus the protected new entry),
+Expected: the unbookmarked count is about 1901 (1900 target with the default
+unified limit of 2000 and `PRUNE_FILL_PERCENT=95`, plus the protected new entry),
 `alpha` is present, and the retained scores are the higher ones. Bookmarks are
 exempt from both the limit and deletion.
 

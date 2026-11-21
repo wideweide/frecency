@@ -378,7 +378,7 @@ GRADE_MODE=on             # rank by match quality (keyword/last-segment grades)
 MULTIWORD_MODE=ordered    # ordered (foo bar matches foo*bar) or any-order
 LAMBDA=0.01               # decay per navigation event; the unified `file`
                           # history defaults to 0.005
-MAX_ENTRIES=1000          # fallback capacity for each history table
+MAX_ENTRIES=1000          # fallback capacity for the dir/file tables (unified pool defaults to 2000)
 MAX_ENTRIES_UNIFIED=      # per-table override for the `entries` table
 MAX_ENTRIES_DIR=          # per-table override for `dir_entries`
 MAX_ENTRIES_FILE=         # per-table override for `file_entries`
@@ -403,7 +403,10 @@ destination that topic writes.
 Maintenance is capacity-based only, run after every write and by
 `frecency <topic> cleanup`: when a table exceeds its `MAX_ENTRIES` limit it is
 trimmed by removing the lowest-scoring entries down to `PRUNE_FILL_PERCENT` of
-the limit (95% by default). Values outside 50-100 fall back to 95. A cleanup
+the limit (95% by default). Values outside 50-100 fall back to 95. The unified
+`entries` pool holds directories and files together and its event clock ticks
+about twice as fast, so with no explicit `MAX_ENTRIES` it defaults to 2000 —
+twice the split dir/file tables. A cleanup
 pass never shortens a table that is at or below its limit; the fill percentage
 is hysteresis, not a second cap. There is deliberately **no score threshold**: a
 score is an ordinal used for ranking and for choosing which rows a capacity trim
@@ -427,7 +430,8 @@ SEARCH and NORMAL modes. On older fzf the native `1/32` counter is shown.
 query-aware grading). On a 16000-row table, limiting a broad query to 32 rows
 cut the reload from ~271 ms to ~72 ms in the manual benchmark. `SLEEP_DELAY`
 (default 0.02 s) is only a short debounce — fzf cancels superseded reloads. If
-an existing table already holds more than 1000 rows and has no
+an existing table already holds more rows than its default limit (1000 for the
+split dir/file tables, 2000 for the unified pool) and has no
 explicit limit, the next write or cleanup trims it to the new fill level; set
 `MAX_ENTRIES` explicitly to keep a larger history. A low-probability background
 pass (about 1 in 200 writes) runs the same `cleanup` as a safety net for

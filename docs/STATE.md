@@ -70,6 +70,7 @@ change; record the actual commands and results here.
 | jghub cross-check | `scripts/bench.sh 110` same-day A/B: /dev/shm add ~39, jump ~42, reload ~30, unlimited ~42, limit32 ~26; /tmp HDD add ~187-189, jump ~29, reload ~25, unlimited ~37.5, limit32 ~26-30 — reads are disk-insensitive with warm caches, writes ~4.8x slower on the HDD; today's tmpfs add ~39 vs the recorded ~24-25 and reload ~30 vs ~17 show roughly +/-60% day-to-day/load variance | pass |
 | bench portability | `scripts/bench.sh` `now_ns()` switched from `date +%s%N` (GNU-only; macOS/BSD `date` lacks `%N`, so the script could not run there) to string-concatenated `EPOCHREALTIME` with a GNU-date fallback; 50 ms sleep probe returns ~53 ms; `bench.sh 110` rerun on /dev/shm: add 74.4/27.6, jump 28.1, reload 19.9, unlimited 27.9, limit32 27.9/28.0 | pass |
 | Usage model docs | README "Typical use" recommendation checked against the implementation (`QUERY_LIMIT` 32/0 semantics, best-match `j` with rc≠0 on no-match, ordered/any-order multi-word, `1/n` info line); interaction-model survey of z, autojump, zoxide and ze — all four jump to the single best match non-interactively and show the ranked list only in interactive modes | pass |
+| Unified 2000 default | `_limit_for_dest`: unified fallback 2000 when neither `MAX_ENTRIES` nor `MAX_ENTRIES_UNIFIED` is set (explicit values still pin every table); suite case: 2001 seeded unified rows -> 1900, 1001 dir rows -> 950, explicit `MAX_ENTRIES=500` -> 475; `bash -n` (frecency, bench, run-tests) ok; `tests/run-tests.sh` 29 passed 0 failed; bench.sh default rows now 110/1000/2000/16000 (2000-row tmpfs: add 33.5/28.2, jump 38.2, reload 28.4, unlimited 51.9, limit32 30.2/32.2 ms/op) | pass |
 | P0 cleanup | `MAX_ENTRIES=10`: at 10 rows cleanup keeps 10, at 11 rows trims to 9; `PRUNE_FILL_PERCENT=50` keeps 5 + protected; `0`/`200` fall back to 95% | pass |
 | P0 config | `file.config` `PRUNE_FILL_PERCENT=50` applies to `file_dir`; legacy `_PRUNE_FILL_PERCENT=50` works; `MAX_ENTRIES=08` falls back to the 1000 default | pass |
 | P1 writes | one `--route unified,dir,file` write -> `6\|11\|16`; old vs new `unified,dir` add on a loaded host ~51-56 -> ~42-44 ms/op | pass |
@@ -148,6 +149,18 @@ change; record the actual commands and results here.
 
 ## Recent changes
 
+- 2026-11-21 (unified capacity default, jghub fzf#4789 suggestion): the unified
+  pool (the `entries` table of `file.db` and standalone topics - it holds
+  directories and files together and its event clock ticks ~2x as fast) now
+  defaults to 2000 rows when neither `MAX_ENTRIES` nor `MAX_ENTRIES_UNIFIED`
+  is set; the split dir/file tables keep 1000. Explicit config still pins
+  every table and `0` still disables pruning. Migration-safe: nothing shrinks,
+  and unified tables between 1000 and 2000 rows are simply no longer trimmed
+  by the default. `scripts/bench.sh` default row list grew to
+  110/1000/2000/16000; the 2000-row tmpfs run measured add 33.5/28.2, jump
+  38.2, reload 28.4, unlimited 51.9, limit32 30.2/32.2 ms/op. New CLI case
+  (29 pass); README and REGRESSION updated (the manual 1600-row capacity
+  check now seeds 2200 rows and expects ~1901 for the 2000 default).
 - 2026-11-21 (usage-model recommendation, docs-only): README "Typical use" now
   states the recommended interaction model: `j <term>` jumps to the best
   match; a wrong guess is refined with more keywords or the bookmark tag
