@@ -1,6 +1,6 @@
 # Project state
 
-Last updated: 2026-11-20
+Last updated: 2026-11-21
 Purpose: handoff snapshot for coding agents. Read this after `AGENTS.md`.
 
 ## Status at a glance
@@ -66,6 +66,9 @@ change; record the actual commands and results here.
 
 | Area | Check | Result |
 |---|---|---|
+| jghub cross-check | Replicated the fzf#4789 CLI probes on this host (disposable HOME, 110 rows via 990 real adds): unlimited `internal-query all dir` ~43.7 ms/op, capped 32+TOTAL ~26.7 ms/op, `jump-handler --emit=path` ~29-31 ms/op (validation-exit path; one `stat` short of the success path), `add` ~187-266 ms/op on /tmp HDD; fixed-overhead split: `bash -c :` 1.8 ms, `bash -n` 4.7 ms (net parse ~3 ms), in-process source loop (jghub's method) 12.3 ms/op (HDD scratch) / 13.7 ms/op (tmpfs scratch), sqlite3 spawn+open 4.0 ms; sqlite commit microbench 85 ms (HDD) vs 6.3 ms (tmpfs) | pass |
+| jghub cross-check | `scripts/bench.sh 110` same-day A/B: /dev/shm add ~39, jump ~42, reload ~30, unlimited ~42, limit32 ~26; /tmp HDD add ~187-189, jump ~29, reload ~25, unlimited ~37.5, limit32 ~26-30 — reads are disk-insensitive with warm caches, writes ~4.8x slower on the HDD; today's tmpfs add ~39 vs the recorded ~24-25 and reload ~30 vs ~17 show roughly +/-60% day-to-day/load variance | pass |
+| bench portability | `scripts/bench.sh` `now_ns()` switched from `date +%s%N` (GNU-only; macOS/BSD `date` lacks `%N`, so the script could not run there) to string-concatenated `EPOCHREALTIME` with a GNU-date fallback; 50 ms sleep probe returns ~53 ms; `bench.sh 110` rerun on /dev/shm: add 74.4/27.6, jump 28.1, reload 19.9, unlimited 27.9, limit32 27.9/28.0 | pass |
 | P0 cleanup | `MAX_ENTRIES=10`: at 10 rows cleanup keeps 10, at 11 rows trims to 9; `PRUNE_FILL_PERCENT=50` keeps 5 + protected; `0`/`200` fall back to 95% | pass |
 | P0 config | `file.config` `PRUNE_FILL_PERCENT=50` applies to `file_dir`; legacy `_PRUNE_FILL_PERCENT=50` works; `MAX_ENTRIES=08` falls back to the 1000 default | pass |
 | P1 writes | one `--route unified,dir,file` write -> `6\|11\|16`; old vs new `unified,dir` add on a loaded host ~51-56 -> ~42-44 ms/op | pass |
@@ -144,6 +147,27 @@ change; record the actual commands and results here.
 
 ## Recent changes
 
+- 2026-11-21 (bench portability): `scripts/bench.sh` could not run on macOS:
+  `date +%N` is a GNU extension and BSD date emits a literal `N`, which breaks
+  the `set -u` arithmetic at the first bench call. `now_ns()` now prefers
+  `EPOCHREALTIME` (bash >= 5.0; seconds and the 6-digit microsecond fraction
+  are string-concatenated into nanoseconds because `printf '%d'` rejects both
+  leading-zero and `10#N` forms) and falls back to GNU `date`. Verified with a
+  50 ms sleep probe (~53 ms) and a 110-row tmpfs rerun in the usual ranges.
+  README notes the portability. Purpose: give jghub a runnable bench for the
+  fzf#4789 cross-machine comparison.
+- 2026-11-21 (jghub benchmark cross-check, no code change): compared jghub's
+  manual fzf#4789 probes with `scripts/bench.sh` and replicated them on this
+  host. Method differences: bench seeds rows via SQL with `MAX_ENTRIES=0` and
+  times 20 warm iterations, jghub did 1000 real adds / 100 cold iterations on a
+  real APFS-SSD db with default caps; his `internal-query all "$PAT"` without a
+  limit argument is the unlimited variant. After host normalization both
+  datasets agree; residual gaps come from disk type (writes only: tmpfs ~39 vs
+  HDD ~187-266 ms/add; reads disk-insensitive), OS process startup (macOS
+  `bash -c :` 15 ms vs Linux 1.8 ms), and ~+/-60% run-to-run variance. His
+  "28 ms pure parse" is script definition/setup bound (in-process source loop
+  12.3 ms/op here, net parse ~3 ms), relevant to the ksh93 discussion: ksh93
+  would mainly cut spawn cost, not the write path (disk-sync bound).
 - 2026-11-20 (query cap): added `QUERY_LIMIT` (default 32, `0` = unlimited).
   `internal-query` still computes and orders every match in SQL, but formats
   and outputs only the top N, appending `TOTAL n` to its own result when asked.

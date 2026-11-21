@@ -499,9 +499,11 @@ BENCH_ROOT=/dev/shm scripts/bench.sh     # tmpfs avoids slow fsync on some hosts
 scripts/bench.sh 1500 3000 5000          # custom row counts
 ```
 
-It seeds a disposable database and reports ms/op per action. Absolute numbers
-depend on the host (shell startup, filesystem, load, warm caches); compare
-before/after runs on the same machine instead of treating them as targets.
+It seeds a disposable database and reports ms/op per action. Timing prefers
+bash >= 5's `EPOCHREALTIME` so the script also runs on macOS (BSD `date` lacks
+`%N`), with a GNU `date` fallback. Absolute numbers depend on the host (shell
+startup, filesystem, load, warm caches); compare before/after runs on the same
+machine instead of treating them as targets.
 
 ## CLI
 

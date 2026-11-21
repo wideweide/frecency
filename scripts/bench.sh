@@ -35,7 +35,18 @@ DB="$DATA/file.db"
 SQLITE3=$( { cat "$DATA/.sqlite3.bin" 2>/dev/null || printf 'sqlite3'; } )
 printf 'IGNORE_PATTERNS=()\nMAX_ENTRIES=0\n' > "$DATA/file.config"
 
-now_ns() { date +%s%N; }
+# Nanosecond timestamp. macOS/BSD date lacks %N (a GNU extension), so prefer
+# EPOCHREALTIME (bash >= 5.0; always carries a 6-digit microsecond fraction)
+# and fall back to GNU date for older hosts. The fraction is kept as a string:
+# printf '%d' rejects leading-zero and 10#N forms alike.
+now_ns() {
+    local t=${EPOCHREALTIME:-}
+    if [[ -n "$t" && "$t" == *.* ]]; then
+        printf '%s%s000' "${t%%.*}" "${t#*.}"
+    else
+        date +%s%N
+    fi
+}
 
 bench() { # bench <label> <iterations> <command...>
     local label=$1 iterations=$2
